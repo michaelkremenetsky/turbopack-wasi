@@ -10,8 +10,11 @@ import { Worker } from 'node:worker_threads'
 
 Error.stackTraceLimit = 120
 const root = path.join(import.meta.dirname, '..')
-const nativeDir = path.join(root, 'vendor/next.js/packages/next-swc/native')
+const nativeDir = process.env.WASI_NATIVE_DIR ?? path.join(root, 'vendor/next.js/packages/next-swc/native')
 const fixture = path.resolve(process.argv[2] ?? path.join(root, 'fixtures/hello-app'))
+// monorepos: rootPath = repo root, projectPath = app dir relative to it
+const projectSubdir = process.env.PROJECT_SUBDIR ?? '.'
+const appDir = path.join(fixture, projectSubdir)
 
 // ---- 1. instantiate the wasi binding ---------------------------------------
 const sdkRequire = createRequire(path.join(root, 'sdk/package.json'))
@@ -19,6 +22,35 @@ const rt = sdkRequire('@napi-rs/wasm-runtime')
 
 const bytes = fs.readFileSync(path.join(nativeDir, 'index.wasm32-wasi.wasm'))
 const wasi = new WASI({ version: 'preview1', env: process.env, preopens: { '/': '/' } })
+
+// Parse the module's imported-memory limits so our supplied memory always matches.
+function memoryLimits(buf) {
+  let off = 8
+  const leb = () => { let r = 0, s = 0; for (;;) { const b = buf[off++]; r |= (b & 0x7f) << s; if (!(b & 0x80)) return r >>> 0; s += 7 } }
+  while (off < buf.length) {
+    const id = buf[off++], size = leb(), end = off + size
+    if (id === 2) {
+      const count = leb()
+      for (let i = 0; i < count; i++) {
+        const mlen = leb(); off += mlen
+        const nlen = leb(); off += nlen
+        const kind = buf[off++]
+        if (kind === 0) leb() // func: typeidx
+        else if (kind === 1) { off++; const f = buf[off - 1] & 1 ? (leb(), leb()) : leb() } // table
+        else if (kind === 2) { // memory
+          const flags = buf[off++]
+          const min = leb()
+          const max = flags & 1 ? leb() : undefined
+          return { min, max, shared: !!(flags & 2) }
+        } else if (kind === 3) off += 2 // global: type + mut
+      }
+    }
+    off = end
+  }
+  return null
+}
+const limits = memoryLimits(bytes) ?? { min: 8192, max: 65536, shared: true }
+console.error('[app-test] module memory limits:', JSON.stringify(limits))
 
 const { napiModule } = await rt.instantiateNapiModule(bytes, {
   context: rt.getDefaultContext(),
@@ -43,7 +75,11 @@ const { napiModule } = await rt.instantiateNapiModule(bytes, {
       ...importObject.env,
       ...importObject.napi,
       ...importObject.emnapi,
-      memory: new WebAssembly.Memory({ initial: 8192, maximum: 65536, shared: true }),
+      memory: new WebAssembly.Memory({
+        initial: Math.max(limits.min, 8192),
+        maximum: limits.max ?? 65536,
+        shared: limits.shared,
+      }),
     }
     return importObject
   },
@@ -69,14 +105,17 @@ if (process.env.WASI_RUST_TRACE) {
 
 // ---- 2. load next's own binding wrapper over our raw bindings ---------------
 process.env.__INTERNAL_CUSTOM_TURBOPACK_BINDINGS = path.join(root, 'scripts/wasi-bindings-shim.cjs')
-process.env.__NEXT_VERSION = '16.2.10'
+process.env.__NEXT_VERSION = process.env.NEXT_FIXTURE_VERSION ?? '16.2.10'
 
-const appRequire = createRequire(path.join(fixture, 'package.json'))
+const appRequire = createRequire(path.join(appDir, 'package.json'))
 const swc = appRequire('next/dist/build/swc')
 const { PHASE_DEVELOPMENT_SERVER } = appRequire('next/dist/shared/lib/constants')
 const loadConfig = appRequire('next/dist/server/config').default
 
-const nextConfig = await loadConfig(PHASE_DEVELOPMENT_SERVER, fixture)
+const nextConfig = await loadConfig(PHASE_DEVELOPMENT_SERVER, appDir)
+// our build compiles the workerThreads plugin backend only
+nextConfig.experimental ??= {}
+nextConfig.experimental.turbopackPluginRuntimeStrategy = 'workerThreads'
 console.error('[app-test] next config loaded')
 
 const bindings = await swc.loadBindings()
@@ -86,7 +125,7 @@ console.error('[app-test] loadBindings ok, isWasm:', bindings.isWasm)
 const project = await bindings.turbo.createProject(
   {
     rootPath: fixture,
-    projectPath: '.',
+    projectPath: projectSubdir,
     distDir: '.next',
     nextConfig,
     watch: { enable: false },
@@ -98,7 +137,7 @@ const project = await bindings.turbo.createProject(
       config: nextConfig,
       dev: true,
       distDir: '.next',
-      projectPath: fixture,
+      projectPath: appDir,
       fetchCacheKeyPrefix: undefined,
       hasRewrites: false,
       middlewareMatchers: undefined,
@@ -116,7 +155,7 @@ const project = await bindings.turbo.createProject(
     writeRoutesHashesManifest: false,
     currentNodeJsVersion: process.versions.node,
     isPersistentCachingEnabled: false,
-    nextVersion: '16.2.10',
+    nextVersion: process.env.NEXT_FIXTURE_VERSION ?? '16.2.10',
     serverHmr: false,
   },
   { isShortSession: true }

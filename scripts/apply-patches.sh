@@ -43,6 +43,11 @@ WASI_BLOCK = '''    if env::var("CARGO_CFG_TARGET_OS").is_ok_and(|value| value =
         println!("cargo:rustc-link-arg=--export=emnapi_async_worker_create");
         println!("cargo:rustc-link-arg=--export=emnapi_async_worker_init");
         println!("cargo:rustc-link-arg=--export-if-defined=wasi_thread_start");
+        println!("cargo:rustc-link-arg=--import-memory");
+        println!("cargo:rustc-link-arg=--import-undefined");
+        println!("cargo:rustc-link-arg=--max-memory=4294967296");
+        println!("cargo:rustc-link-arg=-zstack-size=6400000");
+        println!("cargo:rustc-link-arg=--no-check-features");
         // The wasi reactor crt provides _initialize: main thread-pointer setup + C ctors.
         // rustc links no crt for cdylibs, and without TP setup napi registration spins
         // inside pthread_key handling. node:wasi's initialize() calls the export.
