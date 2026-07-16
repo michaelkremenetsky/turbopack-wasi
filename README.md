@@ -12,7 +12,16 @@ carries a small patch series (`patches/`) that turns Turbopack on for the wasi
 build, and a build pipeline that applies it to any `vercel/next.js` release tag
 so the artifact always matches the user's exact `next` version.
 
-## The patch series (v16.x)
+## The patch series
+
+Three series, selected by tag (`scripts/build.sh`): `patches/` (16.2+),
+`patches-16.0/` (16.0.0–16.1.0) and `patches-16.1/` (16.1.1–16.1.7) — the old
+tags predate the `worker_pool` backend and the `crates/napi` →
+`crates/next-napi-bindings` rename, so they carry rebased variants plus a
+`turbopack-node` commit that compiles the child-process pool via
+type-compatible wasi stubs (spawn/bind fail at runtime with `Unsupported`).
+
+The 16.2 series:
 
 | # | patch | what / why |
 |---|-------|------------|
@@ -25,6 +34,15 @@ so the artifact always matches the user's exact `next` version.
 | 7 | next-api/build/core | make `process_pool` (child processes + TCP — impossible on wasi) an opt-out feature; wasi uses the `worker_pool` (worker_threads) backend |
 | 8 | next-napi-bindings | enable the turbopack/next-api napi modules on wasm32 + misc |
 | 9 | next-napi-bindings | wasi link fixes: drop `--export-dynamic` (>100k exports exceeds V8's 100k wasm export limit; also 182MB→105MB) and link `crt1-reactor.o` + export `_initialize` (main-thread TP setup — without it napi registration spins in pthread_key handling) |
+| 10 | wasi runtime fixes | temp_dir fallback, thread parker (parking_lot_core 0.9.12+nightly), parallelism plumbing |
+| 11 | next-napi-bindings | raw pre-napi runtime install export (see host contract) + **16MB tokio thread stacks** (wasm shadow-stack frames are several times native size; the 2MB default overflows under compile load) + debug probes |
+
+Additionally, `apply-patches.sh` points the workspace at **`vendor-crates/napi`**,
+a fork of napi 2.16.13 that enables the custom-GC threadsafe function on
+wasm+atomics (upstream compiles it out on all wasm targets, so `Buffer`/
+`TypedArray` values dropped on wasi pthreads — e.g. worker-pool task messages
+inside turbo-tasks — called `napi_reference_unref` off-thread and crashed under
+emnapi). Upstreamable shape: `any(not(target_family = "wasm"), target_feature = "atomics")`.
 
 Deliberately still native-only: `css` (lightningcss-napi), the turbopack trace
 server, swc wasm plugins. Persistent caching compiles but should run with the
@@ -72,11 +90,31 @@ On GitHub, trigger the `build-turbopack-wasi` workflow with a `next.js` tag.
       client, ~3s first compile) — `scripts/real-app-test.mjs`
 - [x] **cal.com** (next@16.2.3, version-matched artifact): createProject → **160 routes
       discovered** → `/api/version` app-route compiled with manifests in 8.2s
-- [x] all 11 stable **16.2.x versions built** (8 unique fingerprints), publish dry-runs green
-- [ ] CSS/tailwind pages: next's `worker_pool` JS workers must attach to the shared wasm
-      instance as emnapi child threads (loader-level work; native builds share process statics)
-- [ ] 16.0.x / 16.1.x rebased patch-series variants (mostly comment-rewrap conflicts)
+- [x] **CSS/postcss pages compile** through the `worker_pool` (workerThreads) backend:
+      the bindings shim bridges pool-worker binding calls (`workerCreated` /
+      `sendTaskMessage` / `recvTaskMessageInWorker` — all global-Rust-state ops) to the
+      main thread over `parentPort` RPC (`scripts/wasi-bindings-shim.cjs`)
+- [x] 16.0.x / 16.1.x rebased patch series; all 10 unique old fingerprints apply,
+      16.0.0 cargo-checks green. **Caveat**: `worker_pool` only exists from 16.2.0 —
+      on 16.0/16.1 any JS evaluation (postcss/tailwind/webpack loaders) fails at
+      runtime with a clear `Unsupported` error (inherent to those versions; the
+      child-process pool cannot exist on wasi)
 - [ ] `next dev` end-to-end in a browser runtime
+
+## Known host issue: spurious OOB traps on Node 22 (V8 TurboFan)
+
+Under compile load on Node 22 (V8 12.x, macOS arm64 verified), ~5–10% of runs
+trap with `memory access out of bounds` inside **bulk memory ops**
+(`memory.copy`/`memory.fill`) on freshly allocated regions. Evidence points at
+V8's optimizing tier caching the shared memory's size while another thread
+grows it (a known V8 bug family; Liftoff-only runs — `--no-wasm-tier-up` — are
+0/20 clean, TurboFan runs reproduce, and every crash site is a bulk op).
+**Node 26 runs 0/25 clean — use Node ≥ 24 for real workloads**, or retry on
+`RuntimeError: memory access out of bounds`. Preallocating memory
+(`WASI_MEM_INITIAL_PAGES`) shrinks but does not close the window (the allocator
+keeps growing). Also: initial memory must stay **< 32768 pages** (a single ≥2GB
+free chunk overflows dlmalloc's chunk-size representation at startup; growing
+past 2GB in increments is fine).
 
 ## Host contract (important)
 
