@@ -2,7 +2,7 @@ From b7679e9bc796e3db0cc4bcc2099812437ed8642a Mon Sep 17 00:00:00 2001
 From: michaelkremenetsky
  <28833521+michaelkremenetsky@users.noreply.github.com>
 Date: Thu, 16 Jul 2026 03:31:29 -0700
-Subject: [PATCH 6/8] turbo-tasks-fetch: stub the fetch client on wasm targets
+Subject: [PATCH 6/9] turbo-tasks-fetch: stub the fetch client on wasm targets
 
 reqwest does not build on wasm32-wasip1-threads. Keep the crate API
 identical and resolve every fetch to a FetchError (surfaced as an issue,

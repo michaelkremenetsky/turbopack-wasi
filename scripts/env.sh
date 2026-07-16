@@ -6,7 +6,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd)"
 
 export WASI_SDK_PATH="$ROOT/sdk/wasi-sdk"
 # libemnapi-basic-mt.a from the `emnapi` npm package (npm install in sdk/)
-export EMNAPI_LINK_DIR="${EMNAPI_LINK_DIR:-$ROOT/sdk/node_modules/emnapi/lib/wasm32-wasip1}"
+export EMNAPI_LINK_DIR="${EMNAPI_LINK_DIR:-$ROOT/sdk/node_modules/emnapi/lib/wasm32-wasip1-threads}"
 
 export CC_wasm32_wasip1_threads="$WASI_SDK_PATH/bin/clang"
 export CXX_wasm32_wasip1_threads="$WASI_SDK_PATH/bin/clang++"

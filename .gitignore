@@ -1,3 +1,6 @@
 vendor/
 sdk/
 target/
+dist/
+*.log
+isolate-*.log

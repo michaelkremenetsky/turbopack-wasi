@@ -2,7 +2,7 @@ From 33528bc6e0ad28e21512d05afb15494d3569750f Mon Sep 17 00:00:00 2001
 From: michaelkremenetsky
  <28833521+michaelkremenetsky@users.noreply.github.com>
 Date: Thu, 16 Jul 2026 03:37:10 -0700
-Subject: [PATCH 8/8] next-napi-bindings: enable turbopack and next-api on
+Subject: [PATCH 8/9] next-napi-bindings: enable turbopack and next-api on
  wasm32-wasip1-threads
 
 Compile the full turbopack/next-api stack for the wasi napi build:

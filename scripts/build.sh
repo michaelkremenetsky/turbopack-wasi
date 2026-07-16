@@ -9,6 +9,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TAG="${1:?usage: build.sh <next.js tag, e.g. v16.2.10>}"
 VENDOR="$ROOT/vendor/next.js"
+# Pinned to the same alpha upstream's build-native-wasi uses; see install notes below.
+# (The stable v3 CLI can't drive this napi v2 crate: it sets NAPI_TYPE_DEF_TMP_FOLDER,
+# but napi-derive 2.x reads TYPE_DEF_TMP_PATH, so typedefs and wasi glue never generate.)
 NAPI_CLI_VERSION="3.0.0-alpha.45"
 
 # --- vendor checkout ---------------------------------------------------------
@@ -34,14 +37,27 @@ git -C "$VENDOR" am --3way "$ROOT"/patches/*.patch || {
 "$ROOT/scripts/setup.sh"
 source "$ROOT/scripts/env.sh"
 
-# napi CLI (pins emnapi with a broken gyp install script; skip scripts)
-if [ ! -f "$ROOT/sdk/node_modules/@napi-rs/cli/dist/cli.js" ]; then
-  (cd "$ROOT/sdk" && npm install --no-save --ignore-scripts "@napi-rs/cli@$NAPI_CLI_VERSION" emnapi@latest)
+# napi CLI. We use the 3.0.0-alpha CLI (matches napi crate v2's TYPE_DEF_TMP_PATH /
+# WASI_REGISTER_TMP_PATH conventions and generates the v2 wasi glue), patched to accept the
+# renamed wasm32-wasip1-threads triple. Its bundled emnapi is from 2023 and its C ABI does not
+# match current @emnapi/core JS, so swap it for the current emnapi (must version-match the
+# @emnapi/core used at runtime).
+if [ ! -f "$ROOT/sdk/node_modules/napi-cli-alpha/dist/cli.js" ]; then
+  (cd "$ROOT/sdk" && npm install --save --ignore-scripts \
+    "napi-cli-alpha@npm:@napi-rs/cli@$NAPI_CLI_VERSION" \
+    emnapi@latest @emnapi/core@latest @emnapi/runtime@latest @napi-rs/wasm-runtime@latest)
+  # accept the renamed triple (alpha only knows wasm32-wasi-preview1-threads)
+  sed -i.bak "s/rawTriple === 'wasm32-wasi-preview1-threads')/rawTriple === 'wasm32-wasi-preview1-threads' || rawTriple === 'wasm32-wasip1-threads')/" \
+    "$ROOT/sdk/node_modules/napi-cli-alpha/dist/utils/target.js"
+  # swap the CLI's bundled 2023 emnapi for the current one
+  rm -rf "$ROOT/sdk/node_modules/napi-cli-alpha/node_modules/emnapi"
+  ln -s ../../emnapi "$ROOT/sdk/node_modules/napi-cli-alpha/node_modules/emnapi"
 fi
 
 # --- build -------------------------------------------------------------------
+mkdir -p "$VENDOR/packages/next-swc/native"
 cd "$VENDOR/packages/next-swc"
-node "$ROOT/sdk/node_modules/@napi-rs/cli/dist/cli.js" build \
+node "$ROOT/sdk/node_modules/napi-cli-alpha/dist/cli.js" build \
   --platform --target wasm32-wasip1-threads \
   -p next-napi-bindings --cwd ../../ \
   --output-dir packages/next-swc/native \

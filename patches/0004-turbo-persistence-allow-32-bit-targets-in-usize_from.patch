@@ -2,7 +2,7 @@ From c539967290cb565152501586a7e3156bb2e8b965 Mon Sep 17 00:00:00 2001
 From: michaelkremenetsky
  <28833521+michaelkremenetsky@users.noreply.github.com>
 Date: Thu, 16 Jul 2026 03:28:23 -0700
-Subject: [PATCH 4/8] turbo-persistence: allow 32-bit targets in usize_from_u32
+Subject: [PATCH 4/9] turbo-persistence: allow 32-bit targets in usize_from_u32
 
 u32 -> usize is lossless when the widths are equal, which matches the
 comment's stated assumption (at least 32-bit). Required for wasm32.

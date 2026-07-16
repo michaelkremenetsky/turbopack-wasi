@@ -24,6 +24,7 @@ so the artifact always matches the user's exact `next` version.
 | 6 | turbo-tasks-fetch | stub fetch client on wasm (reqwest doesn't build); fetches resolve to issues |
 | 7 | next-api/build/core | make `process_pool` (child processes + TCP — impossible on wasi) an opt-out feature; wasi uses the `worker_pool` (worker_threads) backend |
 | 8 | next-napi-bindings | enable the turbopack/next-api napi modules on wasm32 + misc |
+| 9 | next-napi-bindings | wasi link fixes: drop `--export-dynamic` (>100k exports exceeds V8's 100k wasm export limit; also 182MB→105MB) and link `crt1-reactor.o` + export `_initialize` (main-thread TP setup — without it napi registration spins in pthread_key handling) |
 
 Deliberately still native-only: `css` (lightningcss-napi), the turbopack trace
 server, swc wasm plugins. Persistent caching compiles but should run with the
@@ -49,10 +50,22 @@ On GitHub, trigger the `build-turbopack-wasi` workflow with a `next.js` tag.
 - `worker_threads` good enough to back turbopack-node's worker pool
 - 32-bit address space: max 4 GiB — use in-memory cache, expect large apps to hit the ceiling
 
+## Gotchas encoded in scripts/build.sh
+
+- napi CLI **3.0.0-alpha.45** (matches napi crate v2 conventions), patched for the
+  `wasm32-wasip1-threads` triple rename, with its bundled 2023-era emnapi swapped for the
+  current one — the emnapi **static lib and the runtime `@emnapi/core` JS must be the same
+  version** (mismatch = async work silently deadlocks: tid never lands at struct offset 20).
+- Loaders must use **async instantiation** (`instantiateNapiModule`) — the sync path can't
+  complete the worker-spawn handshake for the async work pool.
+
 ## Status
 
 - [x] `cargo check -p next-napi-bindings --target wasm32-wasip1-threads` passes with Turbopack enabled (v16.2.10)
 - [x] native (host) build unaffected by the patch series
-- [ ] release `.wasm` artifact via `napi build`
-- [ ] loads under a wasi-threads host; `createProject` smoke test
+- [x] release `.wasm` artifact via `napi build` (105MB, 76 wasm exports, full JS glue)
+- [x] loads under plain Node 22: napi registration completes, `getTargetTriple()` answers,
+      **`projectNew` (turbopack createProject) is exported**, and async `transform()` runs on a
+      spawned wasi thread and returns correct output (`scripts/stage-test-async.mjs`)
+- [ ] `projectNew`/`next dev` smoke test against a real Next.js app dir
 - [ ] `next dev` end-to-end in a browser runtime

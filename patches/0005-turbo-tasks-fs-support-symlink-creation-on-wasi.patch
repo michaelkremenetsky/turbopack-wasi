@@ -2,7 +2,7 @@ From 30e118479f9575283001d24edd3c436d2695bfe2 Mon Sep 17 00:00:00 2001
 From: michaelkremenetsky
  <28833521+michaelkremenetsky@users.noreply.github.com>
 Date: Thu, 16 Jul 2026 03:31:29 -0700
-Subject: [PATCH 5/8] turbo-tasks-fs: support symlink creation on wasi
+Subject: [PATCH 5/9] turbo-tasks-fs: support symlink creation on wasi
 
 Use std::os::wasi::fs::symlink_path (nightly wasi_ext) where the unix
 symlink API was assumed. The notify-based watcher already builds on wasi
