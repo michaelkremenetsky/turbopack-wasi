@@ -1,0 +1,87 @@
+From d041c0562fd1fdf95033b34fbef6d7fca6f24ed1 Mon Sep 17 00:00:00 2001
+From: michaelkremenetsky
+ <28833521+michaelkremenetsky@users.noreply.github.com>
+Date: Thu, 16 Jul 2026 03:37:10 -0700
+Subject: [PATCH 7/8] next-api/next-build/next-core: make process_pool opt-out
+ across the workspace
+
+process_pool spawns node child processes over TCP, neither of which exist
+on wasi. next-api/next-core already exposed it as a default feature;
+extend the same pattern to next-build and declare default-features = false
+at the workspace level so consumers (the wasm napi build) can opt out.
+All native consumers keep process_pool enabled explicitly.
+---
+ Cargo.toml                        | 6 +++---
+ crates/next-api/Cargo.toml        | 2 +-
+ crates/next-build-test/Cargo.toml | 4 ++--
+ crates/next-build/Cargo.toml      | 7 ++++++-
+ 4 files changed, 12 insertions(+), 7 deletions(-)
+
+diff --git a/Cargo.toml b/Cargo.toml
+index 8dc34de2..9d7f2b70 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -298,10 +298,10 @@ debug = true
+ 
+ [workspace.dependencies]
+ # Workspace crates
+-next-api = { path = "crates/next-api" }
+-next-build = { path = "crates/next-build" }
++next-api = { path = "crates/next-api", default-features = false }
++next-build = { path = "crates/next-build", default-features = false }
+ next-code-frame = { path = "crates/next-code-frame" }
+-next-core = { path = "crates/next-core" }
++next-core = { path = "crates/next-core", default-features = false }
+ next-custom-transforms = { path = "crates/next-custom-transforms", default-features = false }
+ next-taskless = { path = "crates/next-taskless" }
+ 
+diff --git a/crates/next-api/Cargo.toml b/crates/next-api/Cargo.toml
+index e7240d1d..a7d1588e 100644
+--- a/crates/next-api/Cargo.toml
++++ b/crates/next-api/Cargo.toml
+@@ -24,7 +24,7 @@ byteorder = { workspace = true }
+ either = { workspace = true }
+ futures = { workspace = true }
+ indexmap = { workspace = true }
+-next-core = { workspace = true }
++next-core = { workspace = true, default-features = false }
+ regex = { workspace = true }
+ roaring = { workspace = true }
+ rustc-hash = { workspace = true }
+diff --git a/crates/next-build-test/Cargo.toml b/crates/next-build-test/Cargo.toml
+index 534e4ae5..750825e7 100644
+--- a/crates/next-build-test/Cargo.toml
++++ b/crates/next-build-test/Cargo.toml
+@@ -12,8 +12,8 @@ workspace = true
+ [dependencies]
+ anyhow = { workspace = true }
+ futures-util = "0.3.30"
+-next-api = { workspace = true }
+-next-core = { workspace = true }
++next-api = { workspace = true, features = ["process_pool"] }
++next-core = { workspace = true, features = ["process_pool"] }
+ num_cpus = "1.16.0"
+ rand = { workspace = true }
+ swc_core = { workspace = true }
+diff --git a/crates/next-build/Cargo.toml b/crates/next-build/Cargo.toml
+index b8fccb63..15456594 100644
+--- a/crates/next-build/Cargo.toml
++++ b/crates/next-build/Cargo.toml
+@@ -12,8 +12,13 @@ bench = false
+ [lints]
+ workspace = true
+ 
++[features]
++default = ["process_pool"]
++process_pool = ["next-core/process_pool"]
++worker_pool = ["next-core/worker_pool"]
++
+ [dependencies]
+-next-core = { workspace = true }
++next-core = { workspace = true, default-features = false }
+ turbopack-core = { workspace = true }
+ turbo-rcstr = { workspace = true }
+ 
+-- 
+2.50.1 (Apple Git-155)
+

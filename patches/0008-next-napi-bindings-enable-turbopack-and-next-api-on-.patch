@@ -1,0 +1,208 @@
+From 33528bc6e0ad28e21512d05afb15494d3569750f Mon Sep 17 00:00:00 2001
+From: michaelkremenetsky
+ <28833521+michaelkremenetsky@users.noreply.github.com>
+Date: Thu, 16 Jul 2026 03:37:10 -0700
+Subject: [PATCH 8/8] next-napi-bindings: enable turbopack and next-api on
+ wasm32-wasip1-threads
+
+Compile the full turbopack/next-api stack for the wasi napi build:
+- pull the turbo-tasks/turbopack/next-* stack into the wasm32 dependency
+  section (worker_pool backend only, no process_pool)
+- ungate the next_api and turbopack napi modules on wasm32
+- keep css (lightningcss-napi) and turbo_trace_server native-only, and
+  gate the trace-server spawn in project.rs (needs a TCP listener)
+- mdxjs needs the serializable feature on wasm too (fixes pre-existing
+  wasm build bitrot in mdx.rs)
+- silence wasm-only unused warnings in exit.rs / static_sorted_file.rs
+---
+ Cargo.lock                                    | 19 +---------------
+ crates/next-napi-bindings/Cargo.toml          | 22 +++++++++++++++----
+ crates/next-napi-bindings/src/lib.rs          |  2 --
+ .../src/next_api/project.rs                   | 19 ++++++++++------
+ .../src/static_sorted_file.rs                 |  3 ++-
+ .../crates/turbopack-trace-utils/src/exit.rs  |  2 ++
+ 6 files changed, 35 insertions(+), 32 deletions(-)
+
+diff --git a/Cargo.lock b/Cargo.lock
+index 585f370f..0da4e7b7 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -1702,22 +1702,6 @@ dependencies = [
+  "winapi",
+ ]
+ 
+-[[package]]
+-name = "crossterm"
+-version = "0.26.1"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "a84cda67535339806297f1b331d6dd6320470d2a0fe65381e79ee9e156dd3d13"
+-dependencies = [
+- "bitflags 1.3.2",
+- "crossterm_winapi",
+- "libc",
+- "mio 0.8.11",
+- "parking_lot",
+- "signal-hook",
+- "signal-hook-mio",
+- "winapi",
+-]
+-
+ [[package]]
+ name = "crossterm_winapi"
+ version = "0.9.1"
+@@ -3428,7 +3412,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "f3a94f0659efe59329832ba0452d3ec753145fc1fb12a8e1d60de4ccf99f5364"
+ dependencies = [
+  "bitflags 1.3.2",
+- "crossterm 0.25.0",
++ "crossterm",
+  "dyn-clone",
+  "lazy_static",
+  "newline-converter",
+@@ -9912,7 +9896,6 @@ name = "turbopack-cli-utils"
+ version = "0.1.0"
+ dependencies = [
+  "anyhow",
+- "crossterm 0.26.1",
+  "owo-colors",
+  "rustc-hash 2.1.1",
+  "serde",
+diff --git a/crates/next-napi-bindings/Cargo.toml b/crates/next-napi-bindings/Cargo.toml
+index 600f1bf5..ae0fe061 100644
+--- a/crates/next-napi-bindings/Cargo.toml
++++ b/crates/next-napi-bindings/Cargo.toml
+@@ -114,9 +114,9 @@ turbo-tasks = { workspace = true }
+ turbo-tasks-backend = { workspace = true }
+ turbo-tasks-fs = { workspace = true }
+ turbo-unix-path = { workspace = true }
+-next-api = { workspace = true, features = ["worker_pool"] }
+-next-build = { workspace = true }
+-next-core = { workspace = true }
++next-api = { workspace = true, features = ["process_pool", "worker_pool"] }
++next-build = { workspace = true, features = ["process_pool"] }
++next-core = { workspace = true, features = ["process_pool"] }
+ 
+ mdxjs = { workspace = true, features = ["serializable"] }
+ 
+@@ -139,10 +139,24 @@ windows-sys = "0.60"
+ getrandom = { version = "0.2.9", default-features = false, features = ["js"] }
+ iana-time-zone = { version = "*", features = ["fallback"] }
+ 
+-mdxjs = { workspace = true }
++mdxjs = { workspace = true, features = ["serializable"] }
+ 
+ turbo-tasks-malloc = { workspace = true, default-features = false }
+ 
++turbo-rcstr = { workspace = true, features = ["napi"] }
++turbo-tasks = { workspace = true }
++turbo-tasks-backend = { workspace = true }
++turbo-tasks-fs = { workspace = true }
++turbo-unix-path = { workspace = true }
++next-api = { workspace = true, default-features = false, features = ["worker_pool"] }
++next-build = { workspace = true, default-features = false, features = ["worker_pool"] }
++next-core = { workspace = true, default-features = false, features = ["worker_pool"] }
++
++turbopack-core = { workspace = true }
++turbopack-ecmascript-hmr-protocol = { workspace = true }
++turbopack-trace-utils = { workspace = true }
++turbopack-node = { workspace = true, default-features = false, features = ["worker_pool"] }
++
+ # wasi-only dependencies.
+ [target.wasm32-wasip1-threads.dependencies]
+ # this requires tokio_unstable currently.
+diff --git a/crates/next-napi-bindings/src/lib.rs b/crates/next-napi-bindings/src/lib.rs
+index 66a88488..a9e5fc01 100644
+--- a/crates/next-napi-bindings/src/lib.rs
++++ b/crates/next-napi-bindings/src/lib.rs
+@@ -48,7 +48,6 @@ pub mod css;
+ pub mod lockfile;
+ pub mod mdx;
+ pub mod minify;
+-#[cfg(not(target_arch = "wasm32"))]
+ pub mod next_api;
+ pub mod parse;
+ pub mod react_compiler;
+@@ -56,7 +55,6 @@ pub mod rspack;
+ pub mod transform;
+ #[cfg(not(target_arch = "wasm32"))]
+ pub mod turbo_trace_server;
+-#[cfg(not(target_arch = "wasm32"))]
+ pub mod turbopack;
+ pub mod util;
+ 
+diff --git a/crates/next-napi-bindings/src/next_api/project.rs b/crates/next-napi-bindings/src/next_api/project.rs
+index 809bf16a..add153f3 100644
+--- a/crates/next-napi-bindings/src/next_api/project.rs
++++ b/crates/next-napi-bindings/src/next_api/project.rs
+@@ -3,9 +3,10 @@ use std::{
+     io::Write,
+     path::{Path, PathBuf},
+     sync::Arc,
+-    thread,
+     time::Duration,
+ };
++#[cfg(not(target_arch = "wasm32"))]
++use std::thread;
+ 
+ use anyhow::{Context, Result, anyhow, bail};
+ use bincode::{Decode, Encode};
+@@ -519,12 +520,16 @@ pub fn project_new(
+                 .unwrap();
+         });
+ 
+-        let trace_server = std::env::var("NEXT_TURBOPACK_TRACE_SERVER").ok();
+-        if trace_server.is_some() {
+-            thread::spawn(move || {
+-                turbopack_trace_server::start_turbopack_trace_server(trace_file, None);
+-            });
+-            println!("Turbopack trace server started. View trace at https://trace.nextjs.org");
++        // The trace server needs a TCP listener, which is unavailable on wasm targets.
++        #[cfg(not(target_arch = "wasm32"))]
++        {
++            let trace_server = std::env::var("NEXT_TURBOPACK_TRACE_SERVER").ok();
++            if trace_server.is_some() {
++                thread::spawn(move || {
++                    turbopack_trace_server::start_turbopack_trace_server(trace_file, None);
++                });
++                println!("Turbopack trace server started. View trace at https://trace.nextjs.org");
++            }
+         }
+ 
+         subscriber.init();
+diff --git a/turbopack/crates/turbo-persistence/src/static_sorted_file.rs b/turbopack/crates/turbo-persistence/src/static_sorted_file.rs
+index 9fa5ad61..cffa7f78 100644
+--- a/turbopack/crates/turbo-persistence/src/static_sorted_file.rs
++++ b/turbopack/crates/turbo-persistence/src/static_sorted_file.rs
+@@ -180,7 +180,8 @@ impl StaticSortedFile {
+     fn open_internal(
+         path: PathBuf,
+         meta: StaticSortedFileMetaData,
+-        sequential: bool,
++        // only used for madvise on unix; wasm has no memory-mapping advice
++        #[cfg_attr(target_family = "wasm", allow(unused_variables))] sequential: bool,
+     ) -> Result<Self> {
+         let file = File::open(&path)
+             .with_context(|| format!("Failed to open SST file {}", path.display()))?;
+diff --git a/turbopack/crates/turbopack-trace-utils/src/exit.rs b/turbopack/crates/turbopack-trace-utils/src/exit.rs
+index ff514705..e53f3d84 100644
+--- a/turbopack/crates/turbopack-trace-utils/src/exit.rs
++++ b/turbopack/crates/turbopack-trace-utils/src/exit.rs
+@@ -4,6 +4,7 @@ use std::{
+     sync::{Arc, Mutex, OnceLock},
+ };
+ 
++#[cfg(not(target_family = "wasm"))]
+ use anyhow::Result;
+ use tokio::{select, sync::mpsc, task::JoinSet};
+ 
+@@ -44,6 +45,7 @@ type BoxExitFuture = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
+ /// The global handler is intentionally not exposed, so that APIs that depend on exit behavior are
+ /// required to take the `ExitHandler`. This ensures that the `ExitHandler` is configured before
+ /// these APIs are run, and that these consumers can be used with a callback (e.g. a mock) instead.
++#[cfg(not(target_family = "wasm"))]
+ static GLOBAL_EXIT_HANDLER: OnceLock<Arc<ExitHandler>> = OnceLock::new();
+ 
+ pub struct ExitHandler {
+-- 
+2.50.1 (Apple Git-155)
+
