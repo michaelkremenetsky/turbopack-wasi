@@ -66,5 +66,20 @@ node "$ROOT/sdk/node_modules/napi-cli-alpha/dist/cli.js" build \
 # --- collect artifacts -------------------------------------------------------
 DIST="$ROOT/dist/$TAG"
 mkdir -p "$DIST"
-cp -v native/*wasm32-wasi* "$DIST"/ 2>/dev/null || cp -Rv native/. "$DIST"/
+cp -Rv native/. "$DIST"/
+# Production pass: keep the full binary (with the ~26MB name section, useful for profiling)
+# as *.debug.wasm; ship a wasm-opt'd, name-stripped binary (100MB -> ~63MB).
+mv "$DIST/index.wasm32-wasi.wasm" "$DIST/index.wasm32-wasi.debug.wasm"
+if command -v wasm-opt >/dev/null 2>&1; then
+  wasm-opt -O2 -all --strip-debug --strip-producers \
+    "$DIST/index.wasm32-wasi.debug.wasm" -o "$DIST/index.wasm32-wasi.wasm"
+else
+  echo "WARNING: wasm-opt not found (brew/apt install binaryen); shipping stripped-only binary" >&2
+  "$WASI_SDK_PATH/bin/llvm-strip" --strip-all \
+    -o "$DIST/index.wasm32-wasi.wasm" "$DIST/index.wasm32-wasi.debug.wasm"
+fi
+if command -v brotli >/dev/null 2>&1; then
+  brotli -q 9 -f -k "$DIST/index.wasm32-wasi.wasm"
+fi
+(cd "$DIST" && shasum -a 256 index.wasm32-wasi.wasm *.cjs *.mjs *.js index.d.ts > SHA256SUMS)
 echo "artifacts in $DIST"

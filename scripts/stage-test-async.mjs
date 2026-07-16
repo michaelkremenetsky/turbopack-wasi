@@ -4,7 +4,8 @@ import path from 'node:path'
 import { WASI } from 'node:wasi'
 import { Worker } from 'node:worker_threads'
 
-const nativeDir = path.join(import.meta.dirname, '..', 'vendor/next.js/packages/next-swc/native')
+const nativeDir =
+  process.argv[2] ?? path.join(import.meta.dirname, '..', 'vendor/next.js/packages/next-swc/native')
 const require = createRequire(path.join(nativeDir, 'index.wasi.cjs'))
 const rt = require('@napi-rs/wasm-runtime')
 

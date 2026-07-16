@@ -63,7 +63,8 @@ On GitHub, trigger the `build-turbopack-wasi` workflow with a `next.js` tag.
 
 - [x] `cargo check -p next-napi-bindings --target wasm32-wasip1-threads` passes with Turbopack enabled (v16.2.10)
 - [x] native (host) build unaffected by the patch series
-- [x] release `.wasm` artifact via `napi build` (105MB, 76 wasm exports, full JS glue)
+- [x] release `.wasm` artifact via `napi build` + `wasm-opt -O2` (**63MB raw / 11MB brotli**;
+      100MB debug variant with names kept alongside; full JS glue for node + browser)
 - [x] loads under plain Node 22: napi registration completes, `getTargetTriple()` answers,
       **`projectNew` (turbopack createProject) is exported**, and async `transform()` runs on a
       spawned wasi thread and returns correct output (`scripts/stage-test-async.mjs`)

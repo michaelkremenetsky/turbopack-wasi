@@ -25,6 +25,9 @@ jobs:
           workspaces: vendor/next.js
           key: wasi-${{ inputs.next_version }}
 
+      - name: Install binaryen + brotli
+        run: sudo apt-get update && sudo apt-get install -y binaryen brotli
+
       - name: Build
         run: |
           # setup.sh downloads wasi-sdk (x86_64-linux on this runner) and the
