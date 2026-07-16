@@ -2,7 +2,7 @@ From 6b04c6ecf053da366eaef42c99e304e8109071d0 Mon Sep 17 00:00:00 2001
 From: michaelkremenetsky
  <28833521+michaelkremenetsky@users.noreply.github.com>
 Date: Thu, 16 Jul 2026 05:09:46 -0700
-Subject: [PATCH 9/9] next-napi-bindings: fix wasi linking for a loadable
+Subject: [PATCH 09/11] next-napi-bindings: fix wasi linking for a loadable
  module
 
 Replace napi_build::setup()'s wasi branch with equivalent link args, minus

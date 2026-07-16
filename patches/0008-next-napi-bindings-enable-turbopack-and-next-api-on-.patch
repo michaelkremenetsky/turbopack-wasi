@@ -2,7 +2,7 @@ From 33528bc6e0ad28e21512d05afb15494d3569750f Mon Sep 17 00:00:00 2001
 From: michaelkremenetsky
  <28833521+michaelkremenetsky@users.noreply.github.com>
 Date: Thu, 16 Jul 2026 03:37:10 -0700
-Subject: [PATCH 8/9] next-napi-bindings: enable turbopack and next-api on
+Subject: [PATCH 08/11] next-napi-bindings: enable turbopack and next-api on
  wasm32-wasip1-threads
 
 Compile the full turbopack/next-api stack for the wasi napi build:
@@ -23,50 +23,6 @@ Compile the full turbopack/next-api stack for the wasi napi build:
  .../crates/turbopack-trace-utils/src/exit.rs  |  2 ++
  6 files changed, 35 insertions(+), 32 deletions(-)
 
-diff --git a/Cargo.lock b/Cargo.lock
-index 585f370f..0da4e7b7 100644
---- a/Cargo.lock
-+++ b/Cargo.lock
-@@ -1702,22 +1702,6 @@ dependencies = [
-  "winapi",
- ]
- 
--[[package]]
--name = "crossterm"
--version = "0.26.1"
--source = "registry+https://github.com/rust-lang/crates.io-index"
--checksum = "a84cda67535339806297f1b331d6dd6320470d2a0fe65381e79ee9e156dd3d13"
--dependencies = [
-- "bitflags 1.3.2",
-- "crossterm_winapi",
-- "libc",
-- "mio 0.8.11",
-- "parking_lot",
-- "signal-hook",
-- "signal-hook-mio",
-- "winapi",
--]
--
- [[package]]
- name = "crossterm_winapi"
- version = "0.9.1"
-@@ -3428,7 +3412,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
- checksum = "f3a94f0659efe59329832ba0452d3ec753145fc1fb12a8e1d60de4ccf99f5364"
- dependencies = [
-  "bitflags 1.3.2",
-- "crossterm 0.25.0",
-+ "crossterm",
-  "dyn-clone",
-  "lazy_static",
-  "newline-converter",
-@@ -9912,7 +9896,6 @@ name = "turbopack-cli-utils"
- version = "0.1.0"
- dependencies = [
-  "anyhow",
-- "crossterm 0.26.1",
-  "owo-colors",
-  "rustc-hash 2.1.1",
-  "serde",
 diff --git a/crates/next-napi-bindings/Cargo.toml b/crates/next-napi-bindings/Cargo.toml
 index 600f1bf5..ae0fe061 100644
 --- a/crates/next-napi-bindings/Cargo.toml

@@ -8,7 +8,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TAG="${1:?usage: build.sh <next.js tag, e.g. v16.2.10>}"
-VENDOR="$ROOT/vendor/next.js"
+VENDOR="${VENDOR_DIR:-$ROOT/vendor/next.js}"
 # Pinned to the same alpha upstream's build-native-wasi uses; see install notes below.
 # (The stable v3 CLI can't drive this napi v2 crate: it sets NAPI_TYPE_DEF_TMP_FOLDER,
 # but napi-derive 2.x reads TYPE_DEF_TMP_PATH, so typedefs and wasi glue never generate.)
@@ -27,7 +27,7 @@ fi
 
 # --- apply patch series ------------------------------------------------------
 git -C "$VENDOR" switch -C "wasi-port-$TAG"
-git -C "$VENDOR" am --3way "$ROOT"/patches/*.patch || {
+"$ROOT/scripts/apply-patches.sh" "$VENDOR" || {
   echo "PATCH SERIES FAILED TO APPLY on $TAG — resolve conflicts and re-export patches." >&2
   git -C "$VENDOR" am --abort || true
   exit 2

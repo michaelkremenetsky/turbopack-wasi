@@ -2,8 +2,8 @@ From d041c0562fd1fdf95033b34fbef6d7fca6f24ed1 Mon Sep 17 00:00:00 2001
 From: michaelkremenetsky
  <28833521+michaelkremenetsky@users.noreply.github.com>
 Date: Thu, 16 Jul 2026 03:37:10 -0700
-Subject: [PATCH 7/9] next-api/next-build/next-core: make process_pool opt-out
- across the workspace
+Subject: [PATCH 07/11] next-api/next-build/next-core: make process_pool
+ opt-out across the workspace
 
 process_pool spawns node child processes over TCP, neither of which exist
 on wasi. next-api/next-core already exposed it as a default feature;

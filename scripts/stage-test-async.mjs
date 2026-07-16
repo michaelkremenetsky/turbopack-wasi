@@ -55,7 +55,8 @@ const { napiModule } = await rt.instantiateNapiModule(bytes, {
   },
   beforeInit({ instance }) {
     globalThis.__lastInstance = instance
-    console.error('[async] beforeInit', Date.now() - t0, 'ms')
+    const rc = instance.exports.init_turbopack_wasi_runtime_raw?.(4)
+    console.error('[async] beforeInit', Date.now() - t0, 'ms, runtime install rc =', rc)
     console.error('[async] exports:', Object.keys(instance.exports).filter((k) => !k.startsWith('__napi')).join(','))
     // _initialize (thread-pointer setup + ctors) is invoked automatically by wasi.initialize()
     console.error('[async] _initialize exported:', typeof instance.exports._initialize)
@@ -71,6 +72,37 @@ console.error('[async] instantiated', Date.now() - t0, 'ms')
 console.error('[async] getTargetTriple:', napiModule.exports.getTargetTriple?.())
 console.error('[async] projectNew type:', typeof napiModule.exports.projectNew)
 console.error('[async] export count:', Object.keys(napiModule.exports).length)
+
+napiModule.exports.initTurbopackWasiRuntime?.(4)
+console.error('[async] timer probe: sleeping 250ms via tokio...')
+const t2 = Date.now()
+const slept = await Promise.race([
+  napiModule.exports.debugSleep(250),
+  new Promise((r) => setTimeout(() => r('TIMED OUT — tokio timer broken'), 5000)),
+])
+console.error('[async] timer probe result:', slept, 'after', Date.now() - t2, 'ms')
+
+for (const [label, fn] of [
+  ['spawn', () => napiModule.exports.debugSpawn(21)],
+  ['readFile', () => napiModule.exports.debugReadFile('/etc/hosts')],
+]) {
+  const t3 = Date.now()
+  const r = await Promise.race([fn(), new Promise((res) => setTimeout(() => res('TIMED OUT'), 8000))])
+  console.error(`[async] ${label} probe:`, r, 'after', Date.now() - t3, 'ms')
+}
+
+{
+  const t4 = Date.now()
+  const got = []
+  const tsfnDone = new Promise((res) => {
+    napiModule.exports.debugTsfnEcho((err, v) => {
+      got.push(err ?? v)
+      if (got.length === 3) res(got)
+    })
+  })
+  const r = await Promise.race([tsfnDone, new Promise((res) => setTimeout(() => res('TSFN TIMED OUT'), 8000))])
+  console.error('[async] tsfn probe:', JSON.stringify(r), 'after', Date.now() - t4, 'ms')
+}
 
 const out = await napiModule.exports.transform(
   'const x: number = 1 as any; export default x;',

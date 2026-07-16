@@ -2,7 +2,7 @@ From 478b43ea25a3c0b87bb4cc726029110026ce63b6 Mon Sep 17 00:00:00 2001
 From: michaelkremenetsky
  <28833521+michaelkremenetsky@users.noreply.github.com>
 Date: Thu, 16 Jul 2026 03:25:02 -0700
-Subject: [PATCH 3/9] turbo-rcstr: allow the napi feature on wasm targets
+Subject: [PATCH 03/11] turbo-rcstr: allow the napi feature on wasm targets
 
 The napi impls only delegate RcStr <-> String conversion, which emnapi
 supports on wasm32-wasip1-threads; the napi crate itself already builds

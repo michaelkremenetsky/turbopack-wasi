@@ -2,7 +2,7 @@ From c5024d4699e14a564c1ea74d7d3ac13c4eb683a7 Mon Sep 17 00:00:00 2001
 From: michaelkremenetsky
  <28833521+michaelkremenetsky@users.noreply.github.com>
 Date: Thu, 16 Jul 2026 03:25:02 -0700
-Subject: [PATCH 2/9] turbopack-trace-utils: gate signal-listening exit APIs
+Subject: [PATCH 02/11] turbopack-trace-utils: gate signal-listening exit APIs
  off on wasm
 
 There are no process signals on WASI. ExitGuard::new and ExitHandler::listen

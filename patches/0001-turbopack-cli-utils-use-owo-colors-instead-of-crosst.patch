@@ -2,8 +2,8 @@ From c8143e2521a4ae245b6f1b532023d76a05ba82da Mon Sep 17 00:00:00 2001
 From: michaelkremenetsky
  <28833521+michaelkremenetsky@users.noreply.github.com>
 Date: Thu, 16 Jul 2026 03:25:02 -0700
-Subject: [PATCH 1/9] turbopack-cli-utils: use owo-colors instead of crossterm
- for issue styling
+Subject: [PATCH 01/11] turbopack-cli-utils: use owo-colors instead of
+ crossterm for issue styling
 
 crossterm does not build on wasm32-wasip1-threads (terminal/event machinery);
 its only use here was ANSI string styling, which owo-colors (already a

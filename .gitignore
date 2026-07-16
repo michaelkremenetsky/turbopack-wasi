@@ -1,6 +1,10 @@
 vendor/
+vendor-builds/
 sdk/
 target/
 dist/
 *.log
 isolate-*.log
+fixtures/calcom/
+fixtures/*/node_modules/
+fixtures/*/.next/
