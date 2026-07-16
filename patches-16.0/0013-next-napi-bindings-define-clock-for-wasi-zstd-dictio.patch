@@ -1,0 +1,39 @@
+From 0be0c4353ceec24b3a0403669a61930afb0c21d5 Mon Sep 17 00:00:00 2001
+From: michaelkremenetsky
+ <28833521+michaelkremenetsky@users.noreply.github.com>
+Date: Thu, 16 Jul 2026 10:49:18 -0700
+Subject: [PATCH] next-napi-bindings: define clock() for wasi (zstd dictionary
+ builder references it)
+
+wasi-libc has no ISO C clock(); zstd's cover/fastcover/zdict progress
+display calls it, and --import-undefined otherwise turns it into an
+env.clock import no host provides.
+---
+ crates/napi/src/lib.rs | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/crates/napi/src/lib.rs b/crates/napi/src/lib.rs
+index 7f41be26..b2ffb738 100644
+--- a/crates/napi/src/lib.rs
++++ b/crates/napi/src/lib.rs
+@@ -193,6 +193,17 @@ pub fn debug_enable_tracing(filter: String) -> napi::Result<()> {
+     Ok(())
+ }
+ 
++/// wasi-libc does not implement the ISO C `clock()` function, and zstd's dictionary
++/// builder (cover.c/fastcover.c/zdict.c, in the dep tree on these tags) references it
++/// for progress display only. Without a definition, `--import-undefined` turns it into
++/// an `env.clock` import that no host provides. Returning 0 disables the elapsed-time
++/// display and nothing else.
++#[cfg(target_os = "wasi")]
++#[unsafe(no_mangle)]
++pub extern "C" fn clock() -> core::ffi::c_longlong {
++    0
++}
++
+ #[cfg(not(target_arch = "wasm32"))]
+ #[napi::module_init]
+ fn init() {
+-- 
+2.50.1 (Apple Git-155)
+
