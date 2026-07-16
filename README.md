@@ -65,8 +65,24 @@ On GitHub, trigger the `build-turbopack-wasi` workflow with a `next.js` tag.
 - [x] native (host) build unaffected by the patch series
 - [x] release `.wasm` artifact via `napi build` + `wasm-opt -O2` (**63MB raw / 11MB brotli**;
       100MB debug variant with names kept alongside; full JS glue for node + browser)
-- [x] loads under plain Node 22: napi registration completes, `getTargetTriple()` answers,
-      **`projectNew` (turbopack createProject) is exported**, and async `transform()` runs on a
-      spawned wasi thread and returns correct output (`scripts/stage-test-async.mjs`)
-- [ ] `projectNew`/`next dev` smoke test against a real Next.js app dir
+- [x] loads under plain Node 22; all primitives verified (timers, tokio spawn, blocking pool,
+      fs reads, threadsafe functions) — `scripts/stage-test-async.mjs`
+- [x] **real Next.js app** (`fixtures/hello-app`, next@16.2.10): createProject → entrypoints
+      (all routes) → `writeToDisk` compiles the page (server bundle + client chunks + HMR
+      client, ~3s first compile) — `scripts/real-app-test.mjs`
+- [x] **cal.com** (next@16.2.3, version-matched artifact): createProject → **160 routes
+      discovered** → `/api/version` app-route compiled with manifests in 8.2s
+- [x] all 11 stable **16.2.x versions built** (8 unique fingerprints), publish dry-runs green
+- [ ] CSS/tailwind pages: next's `worker_pool` JS workers must attach to the shared wasm
+      instance as emnapi child threads (loader-level work; native builds share process statics)
+- [ ] 16.0.x / 16.1.x rebased patch-series variants (mostly comment-rewrap conflicts)
 - [ ] `next dev` end-to-end in a browser runtime
+
+## Host contract (important)
+
+1. Call `instance.exports.init_turbopack_wasi_runtime_raw(threads)` **before any napi call**
+   (napi calls force-initialize a single-threaded fallback runtime that starves turbo-tasks).
+2. Async instantiation (`instantiateNapiModule`), shared memory matching the module's declared
+   limits (parse the import section), preloaded worker pool recommended.
+3. `next.config`: `experimental.turbopackPluginRuntimeStrategy: 'workerThreads'`.
+4. `process.cwd()` must be the app dir when loading next config (next dev semantics).

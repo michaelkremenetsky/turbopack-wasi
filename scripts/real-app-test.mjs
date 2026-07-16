@@ -112,6 +112,8 @@ const swc = appRequire('next/dist/build/swc')
 const { PHASE_DEVELOPMENT_SERVER } = appRequire('next/dist/shared/lib/constants')
 const loadConfig = appRequire('next/dist/server/config').default
 
+// next dev always runs with cwd = the app dir; configs rely on it (e.g. require('./package.json'))
+process.chdir(appDir)
 const nextConfig = await loadConfig(PHASE_DEVELOPMENT_SERVER, appDir)
 // our build compiles the workerThreads plugin backend only
 nextConfig.experimental ??= {}
@@ -175,9 +177,9 @@ const routes = [...entrypoints.routes.keys()].sort()
 console.error('[app-test] ✅ entrypoints received, routes:', JSON.stringify(routes))
 
 // ---- 5. build one endpoint --------------------------------------------------
-const page = entrypoints.routes.get('/')
+const page = entrypoints.routes.get(process.env.TEST_ROUTE ?? '/')
 if (page) {
-  console.error('[app-test] route "/" type:', page.type)
+  console.error('[app-test] route', process.env.TEST_ROUTE ?? '/', 'type:', page.type)
   const candidates = [
     page.htmlEndpoint,
     page.rscEndpoint,
