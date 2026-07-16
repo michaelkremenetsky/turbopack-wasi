@@ -1,0 +1,94 @@
+From 5fdca06fc48a68e4e717e4487d36d1dc81ff4ff2 Mon Sep 17 00:00:00 2001
+From: michaelkremenetsky
+ <28833521+michaelkremenetsky@users.noreply.github.com>
+Date: Thu, 16 Jul 2026 03:31:29 -0700
+Subject: [PATCH 06/12] turbo-tasks-fetch: stub the fetch client on wasm
+ targets
+
+reqwest does not build on wasm32-wasip1-threads. Keep the crate API
+identical and resolve every fetch to a FetchError (surfaced as an issue,
+e.g. failing next/font downloads) instead of failing compilation. A real
+host-backed fetch implementation can replace the stub later.
+---
+ .../turbo-tasks-fetch/src/client_wasm.rs      | 39 +++++++++++++++++++
+ .../crates/turbo-tasks-fetch/src/error.rs     |  1 +
+ turbopack/crates/turbo-tasks-fetch/src/lib.rs |  5 +++
+ 3 files changed, 45 insertions(+)
+ create mode 100644 turbopack/crates/turbo-tasks-fetch/src/client_wasm.rs
+
+diff --git a/turbopack/crates/turbo-tasks-fetch/src/client_wasm.rs b/turbopack/crates/turbo-tasks-fetch/src/client_wasm.rs
+new file mode 100644
+index 00000000..523117b9
+--- /dev/null
++++ b/turbopack/crates/turbo-tasks-fetch/src/client_wasm.rs
+@@ -0,0 +1,39 @@
++use anyhow::Result;
++use turbo_rcstr::RcStr;
++use turbo_tasks::{ResolvedVc, Vc, mark_session_dependent};
++use turbopack_core::issue::StyledString;
++
++use crate::{FetchError, FetchErrorKind, FetchResult};
++
++/// WASM stub for `FetchClientConfig`. reqwest does not build on wasm targets, so `fetch` always
++/// resolves to a `FetchResult` error, which surfaces as an issue rather than a build failure.
++#[turbo_tasks::value(shared)]
++#[derive(Hash, Default)]
++pub struct FetchClientConfig {}
++
++#[turbo_tasks::value_impl]
++impl FetchClientConfig {
++    #[turbo_tasks::function(network)]
++    pub async fn fetch(
++        self: Vc<FetchClientConfig>,
++        url: RcStr,
++        _user_agent: Option<RcStr>,
++    ) -> Result<Vc<FetchResult>> {
++        mark_session_dependent();
++        Ok(Vc::cell(Err(FetchError {
++            detail: StyledString::Text("HTTP fetching is not supported on WASM targets".into())
++                .resolved_cell(),
++            url: ResolvedVc::cell(url),
++            kind: FetchErrorKind::Other.resolved_cell(),
++        }
++        .resolved_cell())))
++    }
++}
++
++#[doc(hidden)]
++pub fn __test_only_reqwest_client_cache_clear() {}
++
++#[doc(hidden)]
++pub fn __test_only_reqwest_client_cache_len() -> usize {
++    0
++}
+diff --git a/turbopack/crates/turbo-tasks-fetch/src/error.rs b/turbopack/crates/turbo-tasks-fetch/src/error.rs
+index eee81e1a..281306a7 100644
+--- a/turbopack/crates/turbo-tasks-fetch/src/error.rs
++++ b/turbopack/crates/turbo-tasks-fetch/src/error.rs
+@@ -58,6 +58,7 @@ fn has_rustls_cause(err: &reqwest::Error) -> bool {
+ }
+ 
+ impl FetchError {
++    #[cfg(not(target_family = "wasm"))]
+     pub(crate) fn from_reqwest_error(
+         error: &reqwest::Error,
+         url: &str,
+diff --git a/turbopack/crates/turbo-tasks-fetch/src/lib.rs b/turbopack/crates/turbo-tasks-fetch/src/lib.rs
+index 2a9444b3..d1601048 100644
+--- a/turbopack/crates/turbo-tasks-fetch/src/lib.rs
++++ b/turbopack/crates/turbo-tasks-fetch/src/lib.rs
+@@ -2,6 +2,11 @@
+ #![feature(arbitrary_self_types)]
+ #![feature(arbitrary_self_types_pointers)]
+ 
++#[cfg(not(target_family = "wasm"))]
++mod client;
++// reqwest does not build on wasm targets; use a stub client whose fetches resolve to errors.
++#[cfg(target_family = "wasm")]
++#[path = "client_wasm.rs"]
+ mod client;
+ mod error;
+ mod response;
+-- 
+2.50.1 (Apple Git-155)
+

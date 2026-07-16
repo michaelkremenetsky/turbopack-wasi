@@ -17,8 +17,9 @@ if [ ! -d "$ROOT/sdk/wasi-sdk" ]; then
 fi
 mkdir -p "$ROOT/sdk/emnapi-stub"
 
-if [ -f "$ROOT/vendor/next.js/rust-toolchain.toml" ]; then
-  CHANNEL="$(grep '^channel' "$ROOT/vendor/next.js/rust-toolchain.toml" | cut -d'"' -f2)"
+VENDOR="${VENDOR_DIR:-$ROOT/vendor/next.js}"
+if [ -f "$VENDOR/rust-toolchain.toml" ]; then
+  CHANNEL="$(grep '^channel' "$VENDOR/rust-toolchain.toml" | cut -d'"' -f2)"
   rustup toolchain install "$CHANNEL" --profile minimal
   rustup target add wasm32-wasip1-threads --toolchain "$CHANNEL"
 fi

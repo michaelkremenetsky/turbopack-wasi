@@ -1,8 +1,8 @@
-From 81e38cf605d4adc200509cff06885f11ad18acb3 Mon Sep 17 00:00:00 2001
+From efc457bb8b121bcb9fa256edbf0ef21ddfe5b4a6 Mon Sep 17 00:00:00 2001
 From: michaelkremenetsky
  <28833521+michaelkremenetsky@users.noreply.github.com>
 Date: Thu, 16 Jul 2026 07:14:29 -0700
-Subject: [PATCH 11/11] next-napi-bindings: wasi runtime install must happen
+Subject: [PATCH 10/12] next-napi-bindings: wasi runtime install must happen
  before any napi call
 
 napi wraps every exported function in within_runtime_if_available, which
@@ -22,14 +22,14 @@ against a real Next.js app: createProject -> entrypoints subscription
 (all routes discovered) -> endpoint.writeToDisk (page compiled: server
 bundle + client chunks + HMR client, ~3.3s for the first page).
 ---
- crates/next-napi-bindings/src/lib.rs | 116 ++++++++++++++++++++++++---
- 1 file changed, 105 insertions(+), 11 deletions(-)
+ crates/napi/src/lib.rs | 122 +++++++++++++++++++++++++++++++++++++----
+ 1 file changed, 111 insertions(+), 11 deletions(-)
 
-diff --git a/crates/next-napi-bindings/src/lib.rs b/crates/next-napi-bindings/src/lib.rs
-index 81cb06f2..be9c1e22 100644
---- a/crates/next-napi-bindings/src/lib.rs
-+++ b/crates/next-napi-bindings/src/lib.rs
-@@ -66,31 +66,131 @@ static ALLOC: turbo_tasks_malloc::TurboMalloc = turbo_tasks_malloc::TurboMalloc;
+diff --git a/crates/napi/src/lib.rs b/crates/napi/src/lib.rs
+index ef8e2a03..7f41be26 100644
+--- a/crates/napi/src/lib.rs
++++ b/crates/napi/src/lib.rs
+@@ -65,31 +65,131 @@ static ALLOC: turbo_tasks_malloc::TurboMalloc = turbo_tasks_malloc::TurboMalloc;
  #[global_allocator]
  static ALLOC: dhat::Alloc = dhat::Alloc;
  
@@ -62,13 +62,13 @@ index 81cb06f2..be9c1e22 100644
          // std::thread::available_parallelism is unsupported on wasi; every implicit sizing
          // must be explicit here.
          .max_blocking_threads(threads * 4)
+-        .enable_all()
 +        // wasi thread stacks live in linear memory at exactly the requested size, and wasm
 +        // shadow-stack frames are several times larger than native (everything spills to the
 +        // stack; turbo-tasks functions inline large futures). The 2MB std/tokio default
 +        // overflows nondeterministically under compile load (OOB traps at task-function
 +        // entry), so give worker + blocking threads real headroom.
 +        .thread_stack_size(16 * 1024 * 1024)
--        .enable_all()
 +        // Time only, deliberately no io driver: mio's wasi poll returns immediately instead of
 +        // blocking, which turns the tokio driver park into a 100%-CPU spin. Without the io
 +        // driver the runtime parks on a condvar (wasm atomics), which blocks properly. Network

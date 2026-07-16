@@ -1,0 +1,46 @@
+From 588c5e8d5cd2fc038499ea4546d1d7cb4022c891 Mon Sep 17 00:00:00 2001
+From: michaelkremenetsky
+ <28833521+michaelkremenetsky@users.noreply.github.com>
+Date: Thu, 16 Jul 2026 03:25:02 -0700
+Subject: [PATCH 03/12] turbo-rcstr: allow the napi feature on wasm targets
+
+The napi impls only delegate RcStr <-> String conversion, which emnapi
+supports on wasm32-wasip1-threads; the napi crate itself already builds
+for that target in this workspace.
+---
+ turbopack/crates/turbo-rcstr/Cargo.toml | 2 --
+ turbopack/crates/turbo-rcstr/src/lib.rs | 5 +----
+ 2 files changed, 1 insertion(+), 6 deletions(-)
+
+diff --git a/turbopack/crates/turbo-rcstr/Cargo.toml b/turbopack/crates/turbo-rcstr/Cargo.toml
+index 9e726a40..6aab9a05 100644
+--- a/turbopack/crates/turbo-rcstr/Cargo.toml
++++ b/turbopack/crates/turbo-rcstr/Cargo.toml
+@@ -18,8 +18,6 @@ new_debug_unreachable = "1.0.6"
+ shrink-to-fit = { workspace = true }
+ rustc-hash = { workspace = true }
+ bytes-str = { workspace = true }
+-
+-[target.'cfg(not(target_family = "wasm"))'.dependencies]
+ napi = { workspace = true, optional = true }
+ 
+ [dev-dependencies]
+diff --git a/turbopack/crates/turbo-rcstr/src/lib.rs b/turbopack/crates/turbo-rcstr/src/lib.rs
+index e6c32e56..42b0811c 100644
+--- a/turbopack/crates/turbo-rcstr/src/lib.rs
++++ b/turbopack/crates/turbo-rcstr/src/lib.rs
+@@ -456,10 +456,7 @@ impl ShrinkToFit for RcStr {
+     fn shrink_to_fit(&mut self) {}
+ }
+ 
+-#[cfg(all(feature = "napi", target_family = "wasm"))]
+-compile_error!("The napi feature cannot be enabled for wasm targets");
+-
+-#[cfg(all(feature = "napi", not(target_family = "wasm")))]
++#[cfg(feature = "napi")]
+ mod napi_impl {
+     use napi::{
+         bindgen_prelude::{FromNapiValue, ToNapiValue, TypeName, ValidateNapiValue},
+-- 
+2.50.1 (Apple Git-155)
+

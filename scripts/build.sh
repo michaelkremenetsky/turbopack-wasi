@@ -26,8 +26,15 @@ else
 fi
 
 # --- apply patch series ------------------------------------------------------
+# 16.0.x/16.1.x predate the worker_pool backend and the crates/napi rename;
+# they carry a rebased series with a stubbed child-process pool.
+case "$TAG" in
+  v16.0.*|v16.1.0) SERIES="$ROOT/patches-16.0" ;;
+  v16.1.*) SERIES="$ROOT/patches-16.1" ;;
+  *) SERIES="$ROOT/patches" ;;
+esac
 git -C "$VENDOR" switch -C "wasi-port-$TAG"
-"$ROOT/scripts/apply-patches.sh" "$VENDOR" || {
+"$ROOT/scripts/apply-patches.sh" "$VENDOR" "$SERIES" || {
   echo "PATCH SERIES FAILED TO APPLY on $TAG — resolve conflicts and re-export patches." >&2
   git -C "$VENDOR" am --abort || true
   exit 2
@@ -55,11 +62,17 @@ if [ ! -f "$ROOT/sdk/node_modules/napi-cli-alpha/dist/cli.js" ]; then
 fi
 
 # --- build -------------------------------------------------------------------
+# The bindings crate/package was renamed during 16.2.
+if [ -d "$VENDOR/crates/next-napi-bindings" ]; then
+  BINDINGS_PKG="next-napi-bindings"
+else
+  BINDINGS_PKG="next-swc-napi"
+fi
 mkdir -p "$VENDOR/packages/next-swc/native"
 cd "$VENDOR/packages/next-swc"
 node "$ROOT/sdk/node_modules/napi-cli-alpha/dist/cli.js" build \
   --platform --target wasm32-wasip1-threads \
-  -p next-napi-bindings --cwd ../../ \
+  -p "$BINDINGS_PKG" --cwd ../../ \
   --output-dir packages/next-swc/native \
   --release --no-default-features
 

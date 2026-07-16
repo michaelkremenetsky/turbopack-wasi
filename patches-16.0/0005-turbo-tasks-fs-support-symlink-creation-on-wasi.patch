@@ -1,0 +1,45 @@
+From 94a36d89fc9b1edafebd9c6caf6f7488a36c2a30 Mon Sep 17 00:00:00 2001
+From: michaelkremenetsky
+ <28833521+michaelkremenetsky@users.noreply.github.com>
+Date: Thu, 16 Jul 2026 03:31:29 -0700
+Subject: [PATCH 05/12] turbo-tasks-fs: support symlink creation on wasi
+
+Use std::os::wasi::fs::symlink_path (nightly wasi_ext) where the unix
+symlink API was assumed. The notify-based watcher already builds on wasi
+via notify's PollWatcher fallback.
+---
+ turbopack/crates/turbo-tasks-fs/src/lib.rs | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/turbopack/crates/turbo-tasks-fs/src/lib.rs b/turbopack/crates/turbo-tasks-fs/src/lib.rs
+index f8ef8671..305ab683 100644
+--- a/turbopack/crates/turbo-tasks-fs/src/lib.rs
++++ b/turbopack/crates/turbo-tasks-fs/src/lib.rs
+@@ -1,6 +1,8 @@
+ #![feature(arbitrary_self_types)]
+ #![feature(arbitrary_self_types_pointers)]
+ #![feature(btree_cursors)] // needed for the `InvalidatorMap` and watcher, reduces time complexity
++// needed for `std::os::wasi::fs::symlink_path` on wasm32-wasi targets
++#![cfg_attr(target_os = "wasi", feature(wasi_ext))]
+ #![feature(io_error_more)]
+ #![feature(iter_advance_by)]
+ #![feature(min_specialization)]
+@@ -1108,10 +1110,14 @@ impl FileSystem for DiskFileSystem {
+                         .entered();
+                         // we use the sync std method here because `symlink` is fast
+                         // if we put it into a task, it will be slower
+-                        #[cfg(not(target_family = "windows"))]
++                        #[cfg(not(any(target_family = "windows", target_os = "wasi")))]
+                         {
+                             std::os::unix::fs::symlink(target_path, &full_path)
+                         }
++                        #[cfg(target_os = "wasi")]
++                        {
++                            std::os::wasi::fs::symlink_path(target_path, &full_path)
++                        }
+                         #[cfg(target_family = "windows")]
+                         {
+                             if link_type.contains(LinkType::DIRECTORY) {
+-- 
+2.50.1 (Apple Git-155)
+

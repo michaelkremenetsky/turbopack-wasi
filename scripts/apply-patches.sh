@@ -10,12 +10,20 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-CHECKOUT="${1:?usage: apply-patches.sh <checkout-dir>}"
+CHECKOUT="${1:?usage: apply-patches.sh <checkout-dir> [patch-series-dir]}"
+SERIES="${2:-$ROOT/patches}"
 
-ls "$ROOT"/patches/*.patch | grep -v '0009-next-napi-bindings-fix-wasi-linking' | \
+# The bindings crate was renamed crates/napi -> crates/next-napi-bindings during 16.2.
+if [ -d "$CHECKOUT/crates/next-napi-bindings" ]; then
+  BINDINGS_DIR="crates/next-napi-bindings"
+else
+  BINDINGS_DIR="crates/napi"
+fi
+
+ls "$SERIES"/*.patch | grep -v '0009-next-napi-bindings-fix-wasi-linking' | \
   xargs git -C "$CHECKOUT" am --3way
 
-python3 - "$CHECKOUT/crates/next-napi-bindings/build.rs" <<'PYEOF'
+python3 - "$CHECKOUT/$BINDINGS_DIR/build.rs" <<'PYEOF'
 import re, sys
 
 path = sys.argv[1]
@@ -85,6 +93,62 @@ open(path, "w").write(src)
 print("build.rs patched (scripted)")
 PYEOF
 
-git -C "$CHECKOUT" add crates/next-napi-bindings/build.rs
+git -C "$CHECKOUT" add "$BINDINGS_DIR/build.rs"
 git -C "$CHECKOUT" commit -q -m "next-napi-bindings: wasi linking fixes (scripted apply)" || true
+
+# Pre-16.2 series: the wasi_stubs module registration in turbopack-node/src/lib.rs
+# is scripted (anchored on `mod pool;`) because the surrounding module list drifts
+# across tags. The stub file itself lands via the 0007 patch.
+TPN_LIB="$CHECKOUT/turbopack/crates/turbopack-node/src/lib.rs"
+if [ -f "$CHECKOUT/turbopack/crates/turbopack-node/src/wasi_stubs.rs" ] && \
+   ! grep -q "mod wasi_stubs" "$TPN_LIB"; then
+  python3 - "$TPN_LIB" <<'PYEOF'
+import sys
+
+path = sys.argv[1]
+src = open(path).read()
+anchor = "mod pool;\n"
+if anchor not in src:
+    sys.exit("could not find `mod pool;` in turbopack-node/src/lib.rs")
+block = (
+    anchor
+    + "// Type-compatible stand-ins for tokio's process/net APIs (which don't exist on\n"
+    + "// wasi) so the child-process pool compiles there; spawning fails at runtime.\n"
+    + '#[cfg(target_family = "wasm")]\n'
+    + "mod wasi_stubs;\n"
+)
+open(path, "w").write(src.replace(anchor, block, 1))
+print("turbopack-node lib.rs patched (scripted)")
+PYEOF
+  git -C "$CHECKOUT" add "$TPN_LIB"
+  git -C "$CHECKOUT" commit -q -m "turbopack-node: register wasi_stubs module (scripted apply)" || true
+fi
+
+# Point the workspace at our napi fork (vendor-crates/napi): upstream napi-rs
+# compiles the custom-GC threadsafe function out on ALL wasm targets, so
+# Buffer/TypedArray values dropped on wasi pthreads (e.g. NapiTaskMessage
+# buffers inside turbo-tasks) call napi_reference_unref off-thread and crash
+# under emnapi. The fork re-enables it for wasm + atomics. Scripted (not a
+# .patch) because the path is machine-specific.
+python3 - "$CHECKOUT/Cargo.toml" "$ROOT/vendor-crates/napi" <<'PYEOF'
+import sys
+
+path, napi_path = sys.argv[1], sys.argv[2]
+src = open(path).read()
+
+if "vendor-crates/napi" in src:
+    print("Cargo.toml already points at the napi fork")
+    sys.exit(0)
+
+line = f'napi = {{ path = "{napi_path}" }} # turbopack-wasi fork: custom GC on wasm+atomics\n'
+if "[patch.crates-io]" in src:
+    src = src.replace("[patch.crates-io]\n", "[patch.crates-io]\n" + line, 1)
+else:
+    src += "\n[patch.crates-io]\n" + line
+open(path, "w").write(src)
+print("Cargo.toml patched with napi fork")
+PYEOF
+
+git -C "$CHECKOUT" add Cargo.toml
+git -C "$CHECKOUT" commit -q -m "workspace: use turbopack-wasi napi fork (custom GC on wasm+atomics)" || true
 echo "patch series applied"

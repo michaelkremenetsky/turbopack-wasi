@@ -1,0 +1,69 @@
+From da95e0271188e35e66984ac5c9ddc809640fc096 Mon Sep 17 00:00:00 2001
+From: michaelkremenetsky
+ <28833521+michaelkremenetsky@users.noreply.github.com>
+Date: Thu, 16 Jul 2026 08:50:40 -0700
+Subject: [PATCH 12/12] turbo-tasks-fetch: 16.0 stub parity (ProxyConfig,
+ config fields, rustls gate)
+
+---
+ .../turbo-tasks-fetch/src/client_wasm.rs      | 25 ++++++++++++++++---
+ .../crates/turbo-tasks-fetch/src/error.rs     |  1 +
+ 2 files changed, 23 insertions(+), 3 deletions(-)
+
+diff --git a/turbopack/crates/turbo-tasks-fetch/src/client_wasm.rs b/turbopack/crates/turbo-tasks-fetch/src/client_wasm.rs
+index 523117b9..c8f57af5 100644
+--- a/turbopack/crates/turbo-tasks-fetch/src/client_wasm.rs
++++ b/turbopack/crates/turbo-tasks-fetch/src/client_wasm.rs
+@@ -1,15 +1,34 @@
+ use anyhow::Result;
++use serde::{Deserialize, Serialize};
+ use turbo_rcstr::RcStr;
+-use turbo_tasks::{ResolvedVc, Vc, mark_session_dependent};
++use turbo_tasks::{NonLocalValue, ResolvedVc, Vc, mark_session_dependent, trace::TraceRawVcs};
+ use turbopack_core::issue::StyledString;
+ 
+ use crate::{FetchError, FetchErrorKind, FetchResult};
+ 
++#[derive(Hash, PartialEq, Eq, Serialize, Deserialize, NonLocalValue, Debug, TraceRawVcs)]
++pub enum ProxyConfig {
++    Http(RcStr),
++    Https(RcStr),
++}
++
+ /// WASM stub for `FetchClientConfig`. reqwest does not build on wasm targets, so `fetch` always
+ /// resolves to a `FetchResult` error, which surfaces as an issue rather than a build failure.
+ #[turbo_tasks::value(shared)]
+-#[derive(Hash, Default)]
+-pub struct FetchClientConfig {}
++#[derive(Hash)]
++pub struct FetchClientConfig {
++    pub tls_built_in_webpki_certs: bool,
++    pub tls_built_in_native_certs: bool,
++}
++
++impl Default for FetchClientConfig {
++    fn default() -> Self {
++        Self {
++            tls_built_in_webpki_certs: true,
++            tls_built_in_native_certs: false,
++        }
++    }
++}
+ 
+ #[turbo_tasks::value_impl]
+ impl FetchClientConfig {
+diff --git a/turbopack/crates/turbo-tasks-fetch/src/error.rs b/turbopack/crates/turbo-tasks-fetch/src/error.rs
+index 281306a7..9ad5e2f9 100644
+--- a/turbopack/crates/turbo-tasks-fetch/src/error.rs
++++ b/turbopack/crates/turbo-tasks-fetch/src/error.rs
+@@ -28,6 +28,7 @@ pub struct FetchError {
+ /// This logic is fragile (e.g. depends that our copy of rustls and the version that reqwest uses
+ /// match exactly), but it's covered by unit tests. This seems slightly better than using `Display`
+ /// or `Debug` and inspecting the string.
++#[cfg(not(target_family = "wasm"))]
+ fn has_rustls_cause(err: &reqwest::Error) -> bool {
+     // make sure this cfg matches the one in `Cargo.toml`!
+     #[cfg(not(any(
+-- 
+2.50.1 (Apple Git-155)
+

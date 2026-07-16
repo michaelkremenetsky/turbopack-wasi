@@ -1,0 +1,29 @@
+From 237c7f8e217c92a97356f2ed21bc6dfd8097ce4c Mon Sep 17 00:00:00 2001
+From: michaelkremenetsky
+ <28833521+michaelkremenetsky@users.noreply.github.com>
+Date: Thu, 16 Jul 2026 03:28:23 -0700
+Subject: [PATCH 04/12] turbo-persistence: allow 32-bit targets in
+ usize_from_u32
+
+u32 -> usize is lossless when the widths are equal, which matches the
+comment's stated assumption (at least 32-bit). Required for wasm32.
+---
+ turbopack/crates/turbo-persistence/src/write_batch.rs | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/turbopack/crates/turbo-persistence/src/write_batch.rs b/turbopack/crates/turbo-persistence/src/write_batch.rs
+index 81ca8491..db5bbdfb 100644
+--- a/turbopack/crates/turbo-persistence/src/write_batch.rs
++++ b/turbopack/crates/turbo-persistence/src/write_batch.rs
+@@ -501,7 +501,7 @@ const fn usize_from_u32(value: u32) -> usize {
+     // This should always be true, as we assume at least a 32-bit width architecture for Turbopack.
+     // Since this is a const expression, we expect it to be compiled away.
+     const {
+-        assert!(u32::BITS < usize::BITS);
++        assert!(u32::BITS <= usize::BITS);
+     };
+     value as usize
+ }
+-- 
+2.50.1 (Apple Git-155)
+

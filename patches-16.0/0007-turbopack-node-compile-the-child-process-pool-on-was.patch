@@ -1,0 +1,251 @@
+From 785ca433a957928f4867764dc01cdf812d405e43 Mon Sep 17 00:00:00 2001
+From: michaelkremenetsky
+ <28833521+michaelkremenetsky@users.noreply.github.com>
+Date: Thu, 16 Jul 2026 08:44:01 -0700
+Subject: [PATCH 07/12] turbopack-node: compile the child-process pool on wasm
+ via type-compatible stubs
+
+wasi has no subprocesses or TCP sockets and tokio does not compile its
+process/net modules there. Swap the pool's OS-bound imports for stand-ins
+whose spawn/bind fail at runtime with Unsupported: JS evaluation
+(postcss/webpack loaders) is inherently unavailable before the
+worker_threads pool existed (next.js 16.2), but everything else on wasi
+still works.
+---
+ turbopack/crates/turbopack-node/src/pool.rs   |   9 +-
+ .../crates/turbopack-node/src/wasi_stubs.rs   | 199 ++++++++++++++++++
+ 2 files changed, 210 insertions(+), 2 deletions(-)
+ create mode 100644 turbopack/crates/turbopack-node/src/wasi_stubs.rs
+
+diff --git a/turbopack/crates/turbopack-node/src/pool.rs b/turbopack/crates/turbopack-node/src/pool.rs
+index 56217310..26d1535e 100644
+--- a/turbopack/crates/turbopack-node/src/pool.rs
++++ b/turbopack/crates/turbopack-node/src/pool.rs
+@@ -22,12 +22,17 @@ use tokio::{
+         AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, Stderr,
+         Stdout, stderr, stdout,
+     },
+-    net::{TcpListener, TcpStream},
+-    process::{Child, ChildStderr, ChildStdout, Command},
+     select,
+     sync::{OwnedSemaphorePermit, Semaphore},
+     time::{sleep, timeout},
+ };
++#[cfg(not(target_family = "wasm"))]
++use tokio::{
++    net::{TcpListener, TcpStream},
++    process::{Child, ChildStderr, ChildStdout, Command},
++};
++#[cfg(target_family = "wasm")]
++use crate::wasi_stubs::{Child, ChildStderr, ChildStdout, Command, TcpListener, TcpStream};
+ use turbo_rcstr::RcStr;
+ use turbo_tasks::{FxIndexSet, ResolvedVc, Vc, duration_span};
+ use turbo_tasks_fs::{FileSystemPath, json::parse_json_with_source_context};
+diff --git a/turbopack/crates/turbopack-node/src/wasi_stubs.rs b/turbopack/crates/turbopack-node/src/wasi_stubs.rs
+new file mode 100644
+index 00000000..8e48c98d
+--- /dev/null
++++ b/turbopack/crates/turbopack-node/src/wasi_stubs.rs
+@@ -0,0 +1,199 @@
++//! Type-compatible stand-ins for the tokio process/net APIs used by the
++//! child-process pool. wasi has no subprocesses or TCP sockets, and tokio
++//! does not even compile those modules there. `Command::spawn` and
++//! `TcpListener::bind` fail at runtime with `Unsupported`; everything
++//! downstream of them is unreachable but must still type-check so the pool
++//! compiles on wasm targets.
++#![allow(dead_code)]
++
++use std::{
++    convert::Infallible,
++    ffi::OsStr,
++    io,
++    net::SocketAddr,
++    path::Path,
++    pin::Pin,
++    process::{ExitStatus, Stdio},
++    task::{Context, Poll},
++};
++
++use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
++
++fn unsupported() -> io::Error {
++    io::Error::new(
++        io::ErrorKind::Unsupported,
++        "child processes and TCP sockets are not available on wasi; JS evaluation \
++         (postcss/webpack loaders) needs the worker_threads pool from next.js >= 16.2",
++    )
++}
++
++pub struct Command;
++
++impl Command {
++    pub fn new(_program: impl AsRef<OsStr>) -> Self {
++        Command
++    }
++
++    pub fn current_dir(&mut self, _dir: impl AsRef<Path>) -> &mut Self {
++        self
++    }
++
++    pub fn arg(&mut self, _arg: impl AsRef<OsStr>) -> &mut Self {
++        self
++    }
++
++    pub fn args(&mut self, _args: impl IntoIterator<Item = impl AsRef<OsStr>>) -> &mut Self {
++        self
++    }
++
++    pub fn env(&mut self, _key: impl AsRef<OsStr>, _val: impl AsRef<OsStr>) -> &mut Self {
++        self
++    }
++
++    pub fn envs(
++        &mut self,
++        _vars: impl IntoIterator<Item = (impl AsRef<OsStr>, impl AsRef<OsStr>)>,
++    ) -> &mut Self {
++        self
++    }
++
++    pub fn env_clear(&mut self) -> &mut Self {
++        self
++    }
++
++    pub fn stdin(&mut self, _cfg: Stdio) -> &mut Self {
++        self
++    }
++
++    pub fn stdout(&mut self, _cfg: Stdio) -> &mut Self {
++        self
++    }
++
++    pub fn stderr(&mut self, _cfg: Stdio) -> &mut Self {
++        self
++    }
++
++    pub fn kill_on_drop(&mut self, _kill_on_drop: bool) -> &mut Self {
++        self
++    }
++
++    pub fn spawn(&mut self) -> io::Result<Child> {
++        Err(unsupported())
++    }
++}
++
++pub struct Child {
++    pub stdin: Option<ChildStdin>,
++    pub stdout: Option<ChildStdout>,
++    pub stderr: Option<ChildStderr>,
++    never: Infallible,
++}
++
++impl Child {
++    pub fn id(&self) -> Option<u32> {
++        match self.never {}
++    }
++
++    pub fn start_kill(&mut self) -> io::Result<()> {
++        match self.never {}
++    }
++
++    pub async fn kill(&mut self) -> io::Result<()> {
++        match self.never {}
++    }
++
++    pub async fn wait(&mut self) -> io::Result<ExitStatus> {
++        match self.never {}
++    }
++}
++
++macro_rules! stub_read_stream {
++    ($name:ident) => {
++        pub struct $name(Infallible);
++
++        impl AsyncRead for $name {
++            fn poll_read(
++                self: Pin<&mut Self>,
++                _cx: &mut Context<'_>,
++                _buf: &mut ReadBuf<'_>,
++            ) -> Poll<io::Result<()>> {
++                match self.get_mut().0 {}
++            }
++        }
++    };
++}
++
++stub_read_stream!(ChildStdout);
++stub_read_stream!(ChildStderr);
++
++pub struct ChildStdin(Infallible);
++
++impl AsyncWrite for ChildStdin {
++    fn poll_write(
++        self: Pin<&mut Self>,
++        _cx: &mut Context<'_>,
++        _buf: &[u8],
++    ) -> Poll<io::Result<usize>> {
++        match self.get_mut().0 {}
++    }
++
++    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
++        match self.get_mut().0 {}
++    }
++
++    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
++        match self.get_mut().0 {}
++    }
++}
++
++pub struct TcpListener(Infallible);
++
++impl TcpListener {
++    pub async fn bind(_addr: &str) -> io::Result<Self> {
++        Err(unsupported())
++    }
++
++    pub fn local_addr(&self) -> io::Result<SocketAddr> {
++        match self.0 {}
++    }
++
++    pub async fn accept(&self) -> io::Result<(TcpStream, SocketAddr)> {
++        match self.0 {}
++    }
++}
++
++pub struct TcpStream(Infallible);
++
++impl TcpStream {
++    pub fn set_nodelay(&self, _nodelay: bool) -> io::Result<()> {
++        match self.0 {}
++    }
++}
++
++impl AsyncRead for TcpStream {
++    fn poll_read(
++        self: Pin<&mut Self>,
++        _cx: &mut Context<'_>,
++        _buf: &mut ReadBuf<'_>,
++    ) -> Poll<io::Result<()>> {
++        match self.get_mut().0 {}
++    }
++}
++
++impl AsyncWrite for TcpStream {
++    fn poll_write(
++        self: Pin<&mut Self>,
++        _cx: &mut Context<'_>,
++        _buf: &[u8],
++    ) -> Poll<io::Result<usize>> {
++        match self.get_mut().0 {}
++    }
++
++    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
++        match self.get_mut().0 {}
++    }
++
++    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
++        match self.get_mut().0 {}
++    }
++}
+-- 
+2.50.1 (Apple Git-155)
+

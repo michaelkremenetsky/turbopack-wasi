@@ -1,0 +1,130 @@
+From 33b69207f0d08341e491c68c443704bb12cbc32d Mon Sep 17 00:00:00 2001
+From: michaelkremenetsky
+ <28833521+michaelkremenetsky@users.noreply.github.com>
+Date: Thu, 16 Jul 2026 03:37:10 -0700
+Subject: [PATCH 08/12] next-napi-bindings: enable turbopack and next-api on
+ wasm32-wasip1-threads
+
+Compile the full turbopack/next-api stack for the wasi napi build:
+- pull the turbo-tasks/turbopack/next-* stack into the wasm32 dependency
+  section (worker_pool backend only, no process_pool)
+- ungate the next_api and turbopack napi modules on wasm32
+- keep css (lightningcss-napi) and turbo_trace_server native-only, and
+  gate the trace-server spawn in project.rs (needs a TCP listener)
+- mdxjs needs the serializable feature on wasm too (fixes pre-existing
+  wasm build bitrot in mdx.rs)
+- silence wasm-only unused warnings in exit.rs / static_sorted_file.rs
+---
+ crates/napi/Cargo.toml                        | 15 +++++++++++++-
+ crates/napi/src/lib.rs                        |  2 --
+ crates/napi/src/next_api/project.rs           | 20 ++++++++++++-------
+ .../crates/turbopack-trace-utils/src/exit.rs  |  2 ++
+ 4 files changed, 29 insertions(+), 10 deletions(-)
+
+diff --git a/crates/napi/Cargo.toml b/crates/napi/Cargo.toml
+index f754b9ab..56c27cd0 100644
+--- a/crates/napi/Cargo.toml
++++ b/crates/napi/Cargo.toml
+@@ -133,10 +133,23 @@ windows-sys = "0.60"
+ getrandom = { version = "0.2.9", default-features = false, features = ["js"] }
+ iana-time-zone = { version = "*", features = ["fallback"] }
+ 
+-mdxjs = { workspace = true }
++mdxjs = { workspace = true, features = ["serializable"] }
+ 
+ turbo-tasks-malloc = { workspace = true, default-features = false }
+ 
++turbo-rcstr = { workspace = true, features = ["napi"] }
++turbo-tasks = { workspace = true }
++turbo-tasks-backend = { workspace = true }
++turbo-tasks-fs = { workspace = true }
++turbo-unix-path = { workspace = true }
++next-api = { workspace = true }
++next-build = { workspace = true }
++next-core = { workspace = true }
++
++turbopack-core = { workspace = true }
++turbopack-ecmascript-hmr-protocol = { workspace = true }
++turbopack-trace-utils = { workspace = true }
++
+ # wasi-only dependencies.
+ [target.wasm32-wasip1-threads.dependencies]
+ # this requires tokio_unstable currently.
+diff --git a/crates/napi/src/lib.rs b/crates/napi/src/lib.rs
+index d2f7bfc1..6ebef31b 100644
+--- a/crates/napi/src/lib.rs
++++ b/crates/napi/src/lib.rs
+@@ -47,7 +47,6 @@ pub mod css;
+ pub mod lockfile;
+ pub mod mdx;
+ pub mod minify;
+-#[cfg(not(target_arch = "wasm32"))]
+ pub mod next_api;
+ pub mod parse;
+ pub mod react_compiler;
+@@ -55,7 +54,6 @@ pub mod rspack;
+ pub mod transform;
+ #[cfg(not(target_arch = "wasm32"))]
+ pub mod turbo_trace_server;
+-#[cfg(not(target_arch = "wasm32"))]
+ pub mod turbopack;
+ pub mod util;
+ 
+diff --git a/crates/napi/src/next_api/project.rs b/crates/napi/src/next_api/project.rs
+index bc052b87..ab4a6c1b 100644
+--- a/crates/napi/src/next_api/project.rs
++++ b/crates/napi/src/next_api/project.rs
+@@ -1,4 +1,6 @@
+-use std::{borrow::Cow, io::Write, path::PathBuf, sync::Arc, thread, time::Duration};
++use std::{borrow::Cow, io::Write, path::PathBuf, sync::Arc, time::Duration};
++#[cfg(not(target_arch = "wasm32"))]
++use std::thread;
+ 
+ use anyhow::{Context, Result, anyhow, bail};
+ use bincode::{Decode, Encode};
+@@ -475,12 +477,16 @@ pub fn project_new(
+                 .unwrap();
+         });
+ 
+-        let trace_server = std::env::var("NEXT_TURBOPACK_TRACE_SERVER").ok();
+-        if trace_server.is_some() {
+-            thread::spawn(move || {
+-                turbopack_trace_server::start_turbopack_trace_server(trace_file, None);
+-            });
+-            println!("Turbopack trace server started. View trace at https://trace.nextjs.org");
++        // The trace server needs a TCP listener, which is unavailable on wasm targets.
++        #[cfg(not(target_arch = "wasm32"))]
++        {
++            let trace_server = std::env::var("NEXT_TURBOPACK_TRACE_SERVER").ok();
++            if trace_server.is_some() {
++                thread::spawn(move || {
++                    turbopack_trace_server::start_turbopack_trace_server(trace_file, None);
++                });
++                println!("Turbopack trace server started. View trace at https://trace.nextjs.org");
++            }
+         }
+ 
+         subscriber.init();
+diff --git a/turbopack/crates/turbopack-trace-utils/src/exit.rs b/turbopack/crates/turbopack-trace-utils/src/exit.rs
+index e5a464a5..848054f4 100644
+--- a/turbopack/crates/turbopack-trace-utils/src/exit.rs
++++ b/turbopack/crates/turbopack-trace-utils/src/exit.rs
+@@ -4,6 +4,7 @@ use std::{
+     sync::{Arc, Mutex, OnceLock},
+ };
+ 
++#[cfg(not(target_family = "wasm"))]
+ use anyhow::Result;
+ use tokio::{select, sync::mpsc, task::JoinSet};
+ 
+@@ -45,6 +46,7 @@ type BoxExitFuture = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
+ /// exit behavior are required to take the `ExitHandler`. This ensures that the
+ /// `ExitHandler` is configured before these APIs are run, and that these
+ /// consumers can be used with a callback (e.g. a mock) instead.
++#[cfg(not(target_family = "wasm"))]
+ static GLOBAL_EXIT_HANDLER: OnceLock<Arc<ExitHandler>> = OnceLock::new();
+ 
+ pub struct ExitHandler {
+-- 
+2.50.1 (Apple Git-155)
+

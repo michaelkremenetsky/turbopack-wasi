@@ -5,10 +5,19 @@
 import fs from 'node:fs'
 import { createRequire } from 'node:module'
 import path from 'node:path'
+import util from 'node:util'
 import { WASI } from 'node:wasi'
 import { Worker } from 'node:worker_threads'
 
 Error.stackTraceLimit = 120
+process.on('unhandledRejection', (reason) => {
+  console.error('[app-test] UNHANDLED REJECTION:', util.inspect(reason, { depth: 4 }))
+  process.exit(3)
+})
+process.on('uncaughtException', (err) => {
+  console.error('[app-test] UNCAUGHT EXCEPTION:', util.inspect(err, { depth: 4 }))
+  process.exit(4)
+})
 const root = path.join(import.meta.dirname, '..')
 const nativeDir = process.env.WASI_NATIVE_DIR ?? path.join(root, 'vendor/next.js/packages/next-swc/native')
 const fixture = path.resolve(process.argv[2] ?? path.join(root, 'fixtures/hello-app'))
@@ -75,11 +84,16 @@ const { napiModule } = await rt.instantiateNapiModule(bytes, {
       ...importObject.env,
       ...importObject.napi,
       ...importObject.emnapi,
-      memory: new WebAssembly.Memory({
-        initial: Math.max(limits.min, 8192),
-        maximum: limits.max ?? 65536,
+      memory: (globalThis.__wasiMemory = new WebAssembly.Memory({
+        // Oversized initial: memory.grow on a shared memory races V8's cached
+        // memory size in TurboFan-compiled bulk ops (spurious OOB traps), so
+        // hosts should start with enough memory that growth never happens.
+        initial: Math.max(limits.min, Number(process.env.WASI_MEM_INITIAL_PAGES ?? 8192)),
+        // WASI_MEM_MAX_PAGES: supplying a smaller max than the module declares is a
+        // valid import subtype; used to probe engine behavior at the 4GB boundary.
+        maximum: Number(process.env.WASI_MEM_MAX_PAGES ?? (limits.max ?? 65536)),
         shared: limits.shared,
-      }),
+      })),
     }
     return importObject
   },
@@ -166,7 +180,8 @@ console.error('[app-test] ✅ createProject succeeded')
 
 const statsTimer = setInterval(() => {
   const top = Object.entries(globalThis.__wasiStats ?? {}).sort((a, b) => b[1] - a[1]).slice(0, 6)
-  console.error('[wasi-stats]', top.map(([k, v]) => `${k}=${v}`).join(' '))
+  const pages = globalThis.__wasiMemory ? globalThis.__wasiMemory.buffer.byteLength / 65536 : 0
+  console.error('[wasi-stats]', `mem=${pages}p`, top.map(([k, v]) => `${k}=${v}`).join(' '))
 }, 5000)
 statsTimer.unref()
 
@@ -199,5 +214,6 @@ if (page) {
     console.error('[app-test] no endpoint found; page:', JSON.stringify(page, null, 0).slice(0, 300))
   }
 }
-console.error('[app-test] DONE')
+const finalPages = globalThis.__wasiMemory ? globalThis.__wasiMemory.buffer.byteLength / 65536 : 0
+console.error('[app-test] DONE (memory now', finalPages, 'pages)')
 process.exit(0)

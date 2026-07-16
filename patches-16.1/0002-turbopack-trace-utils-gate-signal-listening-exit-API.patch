@@ -1,0 +1,40 @@
+From c79a1ab5b26858b6e84b269203146d088e155254 Mon Sep 17 00:00:00 2001
+From: michaelkremenetsky
+ <28833521+michaelkremenetsky@users.noreply.github.com>
+Date: Thu, 16 Jul 2026 03:25:02 -0700
+Subject: [PATCH 02/12] turbopack-trace-utils: gate signal-listening exit APIs
+ off on wasm
+
+There are no process signals on WASI. ExitGuard::new and ExitHandler::listen
+spawn tokio::signal::ctrl_c listeners and are only used by CLI consumers;
+library consumers (next-swc) use ExitHandler::new_receiver.
+---
+ turbopack/crates/turbopack-trace-utils/src/exit.rs | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/turbopack/crates/turbopack-trace-utils/src/exit.rs b/turbopack/crates/turbopack-trace-utils/src/exit.rs
+index 140224da..e5a464a5 100644
+--- a/turbopack/crates/turbopack-trace-utils/src/exit.rs
++++ b/turbopack/crates/turbopack-trace-utils/src/exit.rs
+@@ -19,6 +19,9 @@ impl<T> Drop for ExitGuard<T> {
+ 
+ impl<T: Send + 'static> ExitGuard<T> {
+     /// Drop a guard when Ctrl-C is pressed or the [ExitGuard] is dropped.
++    // There are no process signals on WASI, so this API (which spawns a signal listener) is
++    // native-only. Library consumers should use `ExitHandler::new_receiver` instead.
++    #[cfg(not(target_family = "wasm"))]
+     pub fn new(guard: T) -> Result<Self> {
+         let guard = Arc::new(Mutex::new(Some(guard)));
+         {
+@@ -62,6 +65,8 @@ impl ExitHandler {
+     ///
+     /// This may listen for other signals, like `SIGTERM` or `SIGPIPE` in the
+     /// future.
++    // There are no process signals on WASI; see `ExitGuard::new` above.
++    #[cfg(not(target_family = "wasm"))]
+     pub fn listen() -> &'static Arc<ExitHandler> {
+         let (handler, receiver) = Self::new_receiver();
+         if GLOBAL_EXIT_HANDLER.set(handler).is_err() {
+-- 
+2.50.1 (Apple Git-155)
+
