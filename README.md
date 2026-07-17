@@ -94,11 +94,17 @@ On GitHub, trigger the `build-turbopack-wasi` workflow with a `next.js` tag.
       the bindings shim bridges pool-worker binding calls (`workerCreated` /
       `sendTaskMessage` / `recvTaskMessageInWorker` — all global-Rust-state ops) to the
       main thread over `parentPort` RPC (`scripts/wasi-bindings-shim.cjs`)
-- [x] 16.0.x / 16.1.x rebased patch series; all 10 unique old fingerprints apply,
-      16.0.0 cargo-checks green. **Caveat**: `worker_pool` only exists from 16.2.0 —
-      on 16.0/16.1 any JS evaluation (postcss/tailwind/webpack loaders) fails at
-      runtime with a clear `Unsupported` error (inherent to those versions; the
-      child-process pool cannot exist on wasi)
+- [x] 16.0.x / 16.1.x rebased patch series (incl. wasi `clock()` stub for zstd's
+      dictionary builder and collecting dir entries inside the blocking closure —
+      node:wasi fd tables are per worker thread, so a `ReadDir` fd must not cross
+      threads). **Verified**: next@16.0.11 and next@16.1.2 fixtures compile pages
+      end-to-end with version-matched artifacts. **Caveat**: `worker_pool` only
+      exists from 16.2.0 — on 16.0/16.1 any JS evaluation (postcss/tailwind/webpack
+      loaders) fails at runtime with a clear `Unsupported` error pointing at
+      next >= 16.2 (inherent to those versions; the child-process pool cannot
+      exist on wasi)
+- [x] **all 31 stable v16 versions built** (18 unique fingerprints, `scripts/build-all-v16.sh`),
+      publish dry-runs green for every version
 - [ ] `next dev` end-to-end in a browser runtime
 
 ## Known host issue: spurious OOB traps on Node 22 (V8 TurboFan)
