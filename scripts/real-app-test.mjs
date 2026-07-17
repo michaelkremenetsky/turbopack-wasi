@@ -77,7 +77,11 @@ const { napiModule } = await rt.instantiateNapiModule(bytes, {
       const orig = importObject.wasi_snapshot_preview1[name]
       importObject.wasi_snapshot_preview1[name] = (...args) => {
         globalThis.__wasiStats[name] = (globalThis.__wasiStats[name] ?? 0) + 1
-        return orig(...args)
+        const ret = orig(...args)
+        if (process.env.WASI_TRACE_ERRNO && typeof ret === 'number' && ret !== 0) {
+          console.error(`[wasi-errno] ${name}(${args.slice(0, 4).join(',')}) = ${ret}`)
+        }
+        return ret
       }
     }
     importObject.env = {
@@ -129,9 +133,12 @@ const loadConfig = appRequire('next/dist/server/config').default
 // next dev always runs with cwd = the app dir; configs rely on it (e.g. require('./package.json'))
 process.chdir(appDir)
 const nextConfig = await loadConfig(PHASE_DEVELOPMENT_SERVER, appDir)
-// our build compiles the workerThreads plugin backend only
-nextConfig.experimental ??= {}
-nextConfig.experimental.turbopackPluginRuntimeStrategy = 'workerThreads'
+// our build compiles the workerThreads plugin backend only (option exists from 16.2)
+const fixtureVersion = process.env.NEXT_FIXTURE_VERSION ?? '16.2.10'
+if (!/^16\.[01]\./.test(fixtureVersion)) {
+  nextConfig.experimental ??= {}
+  nextConfig.experimental.turbopackPluginRuntimeStrategy = 'workerThreads'
+}
 console.error('[app-test] next config loaded')
 
 const bindings = await swc.loadBindings()

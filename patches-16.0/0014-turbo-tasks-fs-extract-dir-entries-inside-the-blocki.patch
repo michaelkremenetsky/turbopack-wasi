@@ -1,0 +1,84 @@
+From 8aa2b4bd1d861e3f17cf3efd585c7688796bdee1 Mon Sep 17 00:00:00 2001
+From: michaelkremenetsky
+ <28833521+michaelkremenetsky@users.noreply.github.com>
+Date: Thu, 16 Jul 2026 17:53:38 -0700
+Subject: [PATCH] turbo-tasks-fs: extract dir entries inside the blocking
+ closure (wasi per-thread fd tables)
+
+retry_blocking spawns onto the blocking pool on these tags; the ReadDir
+fd it opens belongs to that thread's WASI instance and is EBADF when the
+task thread iterates it (node:wasi hosts create one WASI fd table per
+worker). Collect (file_name, file_type) inside the closure so no fd
+crosses threads. 16.2 avoids this by running retry_blocking inline
+(vercel/next.js#87661).
+---
+ turbopack/crates/turbo-tasks-fs/src/lib.rs | 35 +++++++++++++---------
+ 1 file changed, 21 insertions(+), 14 deletions(-)
+
+diff --git a/turbopack/crates/turbo-tasks-fs/src/lib.rs b/turbopack/crates/turbo-tasks-fs/src/lib.rs
+index 9d14d2ab..2ac1307e 100644
+--- a/turbopack/crates/turbo-tasks-fs/src/lib.rs
++++ b/turbopack/crates/turbo-tasks-fs/src/lib.rs
+@@ -714,10 +714,19 @@ impl FileSystem for DiskFileSystem {
+ 
+         // we use the sync std function here as it's a lot faster (600%) in
+         // node-file-trace
++        //
++        // The entries (name + type) are extracted INSIDE the blocking closure:
++        // retry_blocking runs on another thread here, and on wasi hosts fd
++        // tables are per-thread (one WASI instance per worker), so a ReadDir
++        // handle opened on the blocking thread is a dangling fd (EBADF) when
++        // iterated from the calling task thread. (16.2 avoids this by running
++        // retry_blocking inline; see vercel/next.js#87661.)
+         let read_dir = match retry_blocking(full_path.clone(), |path| {
+             let _span =
+                 tracing::info_span!("read directory", name = display(path.display())).entered();
+-            std::fs::read_dir(path)
++            std::fs::read_dir(path)?
++                .map(|r| r.and_then(|e| Ok((e.file_name(), e.file_type()?))))
++                .collect::<std::io::Result<Vec<_>>>()
+         })
+         .concurrency_limited(&self.inner.read_semaphore)
+         .await
+@@ -762,14 +771,10 @@ impl FileSystem for DiskFileSystem {
+         };
+ 
+         let entries = read_dir
+-            .filter_map(|r| {
+-                let e = match r {
+-                    Ok(e) => e,
+-                    Err(err) => return Some(Err(err.into())),
+-                };
+-
++            .into_iter()
++            .filter_map(|(name, file_type)| {
+                 // we filter out any non unicode names
+-                let file_name: RcStr = e.file_name().to_str()?.into();
++                let file_name: RcStr = name.to_str()?.into();
+                 // Filter out denied entries
+                 if let Some(denied_name) = denied_entry
+                     && denied_name == file_name.as_str()
+@@ -777,12 +782,14 @@ impl FileSystem for DiskFileSystem {
+                     return None;
+                 }
+ 
+-                let entry = match e.file_type() {
+-                    Ok(t) if t.is_file() => RawDirectoryEntry::File,
+-                    Ok(t) if t.is_dir() => RawDirectoryEntry::Directory,
+-                    Ok(t) if t.is_symlink() => RawDirectoryEntry::Symlink,
+-                    Ok(_) => RawDirectoryEntry::Other,
+-                    Err(err) => return Some(Err(err.into())),
++                let entry = if file_type.is_file() {
++                    RawDirectoryEntry::File
++                } else if file_type.is_dir() {
++                    RawDirectoryEntry::Directory
++                } else if file_type.is_symlink() {
++                    RawDirectoryEntry::Symlink
++                } else {
++                    RawDirectoryEntry::Other
+                 };
+ 
+                 Some(anyhow::Ok((file_name, entry)))
+-- 
+2.50.1 (Apple Git-155)
+
