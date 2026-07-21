@@ -83,21 +83,6 @@ jobs:
         # build sails on to the next step
         run: |
           set -o pipefail
-          env | grep -iE '^(CARGO|RUST)' | sort || true
-          # Something in the CI environment injects a cc-style link arg that
-          # rust-lld (the wasm linker) rejects. Strip it wherever it appears;
-          # only touch variables that are actually set (an empty-but-set
-          # RUSTFLAGS would override cargo config's rustflags, losing
-          # --cfg tokio_unstable).
-          BAD1='-C link-arg=-Wl,--warn-unresolved-symbols'
-          BAD2='-Clink-arg=-Wl,--warn-unresolved-symbols'
-          for var in RUSTFLAGS CARGO_BUILD_RUSTFLAGS CARGO_TARGET_WASM32_WASIP1_THREADS_RUSTFLAGS; do
-            val="${!var:-}"
-            if [ -n "$val" ]; then
-              val="${val//$BAD1/}"; val="${val//$BAD2/}"
-              export "$var=$val"
-            fi
-          done
           bash scripts/build.sh "v${{ matrix.version }}" 2>&1 | tee build.log
       - name: Smoke test (primitives + transform)
         id: smoke

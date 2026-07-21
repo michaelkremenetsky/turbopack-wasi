@@ -95,6 +95,26 @@ if m.group("attr"):
 
 block = WASI_BLOCK.replace("__ORIG_SETUP__", orig_stmt)
 src = src[: m.start()] + block + src[m.end() :]
+
+# Upstream gates this linker workaround on the HOST os (build scripts compile
+# for the host), so Linux hosts inject a cc-style flag into wasm links, which
+# rust-lld rejects. Gate it on the compile target instead.
+HOST_CFG_LINE = (
+    '    #[cfg(all(target_os = "linux", not(target_arch = "wasm32")))]\n'
+    '    println!("cargo:rustc-link-arg=-Wl,--warn-unresolved-symbols");\n'
+)
+TARGET_CHECK = (
+    '    // (wasi patch) upstream gated this on the HOST os; build scripts compile for\n'
+    '    // the host, so Linux hosts injected a cc-style flag into wasm links. Gate on\n'
+    '    // the compile target instead.\n'
+    '    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {\n'
+    '        println!("cargo:rustc-link-arg=-Wl,--warn-unresolved-symbols");\n'
+    '    }\n'
+)
+if HOST_CFG_LINE in src:
+    src = src.replace(HOST_CFG_LINE, TARGET_CHECK, 1)
+    print("build.rs host-cfg linker workaround retargeted")
+
 open(path, "w").write(src)
 print("build.rs patched (scripted)")
 PYEOF
