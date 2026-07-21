@@ -106,7 +106,7 @@ jobs:
           name: next-swc-wasi-v${{ matrix.version }}
           path: dist/v${{ matrix.version }}
           compression-level: 0 # wasm is already brotli'd alongside
-      - name: Publish to npm (kill-switch: repo variable PUBLISH_ON_GREEN)
+      - name: "Publish to npm (kill-switch: repo variable PUBLISH_ON_GREEN)"
         if: success() && vars.PUBLISH_ON_GREEN == 'true'
         run: bash scripts/publish.sh "v${{ matrix.version }}"
       - name: Open issue on failure
