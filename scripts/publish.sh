@@ -109,18 +109,21 @@ fi
 (cd "$STAGE" && npm publish --access public --tag "$DIST_TAG" "${PROVENANCE[@]}")
 
 # Promote to `latest` when this is the highest stable next version published.
+# The just-published version is included explicitly: the registry's version
+# list can lag the publish by a few seconds.
 HIGHEST="$(npm view "$PKG_NAME" versions --json 2>/dev/null | python3 -c '
 import json, re, sys
 versions = json.load(sys.stdin)
 if isinstance(versions, str):
     versions = [versions]
+versions.append(sys.argv[1] + "-build.0")
 best = (0, 0, 0)
 for v in versions:
     m = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)-build\.\d+", v)
     if m:
         best = max(best, tuple(int(x) for x in m.groups()))
 print(".".join(map(str, best)))
-')"
+' "$NEXT_VERSION")"
 if [ "$HIGHEST" = "$NEXT_VERSION" ]; then
   npm dist-tag add "$PKG_NAME@$VERSION" latest
 fi
