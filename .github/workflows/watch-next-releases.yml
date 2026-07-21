@@ -73,7 +73,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 24 # >= 24: Node 22's V8 races shared-memory grow in bulk ops
+          node-version: 26 # Node 22/24 V8 races shared-memory grow in TurboFan bulk ops (verified clean on 26)
       - uses: dtolnay/rust-toolchain@stable
       - name: Install binaryen + brotli
         run: sudo apt-get update && sudo apt-get install -y binaryen brotli

@@ -115,7 +115,7 @@ trap with `memory access out of bounds` inside **bulk memory ops**
 V8's optimizing tier caching the shared memory's size while another thread
 grows it (a known V8 bug family; Liftoff-only runs — `--no-wasm-tier-up` — are
 0/20 clean, TurboFan runs reproduce, and every crash site is a bulk op).
-**Node 26 runs 0/25 clean — use Node ≥ 24 for real workloads**, or retry on
+**Node 26 runs 0/25 clean (Node 24 still reproduces) — use Node ≥ 26 for real workloads**, or retry on
 `RuntimeError: memory access out of bounds`. Preallocating memory
 (`WASI_MEM_INITIAL_PAGES`) shrinks but does not close the window (the allocator
 keeps growing). Also: initial memory must stay **< 32768 pages** (a single ≥2GB
