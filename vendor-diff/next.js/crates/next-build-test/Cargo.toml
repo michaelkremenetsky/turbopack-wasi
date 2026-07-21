@@ -12,8 +12,8 @@ workspace = true
 [dependencies]
 anyhow = { workspace = true }
 futures-util = "0.3.30"
-next-api = { workspace = true }
-next-core = { workspace = true }
+next-api = { workspace = true, features = ["process_pool"] }
+next-core = { workspace = true, features = ["process_pool"] }
 num_cpus = "1.16.0"
 rand = { workspace = true }
 swc_core = { workspace = true }

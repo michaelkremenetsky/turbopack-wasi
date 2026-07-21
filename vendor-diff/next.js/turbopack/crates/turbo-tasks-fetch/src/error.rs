@@ -21,6 +21,7 @@ pub struct FetchError {
 }
 
 impl FetchError {
+    #[cfg(not(target_family = "wasm"))]
     pub(crate) fn from_reqwest_error(error: &reqwest::Error, url: &str) -> FetchError {
         let kind = if error.is_connect() {
             FetchErrorKind::Connect

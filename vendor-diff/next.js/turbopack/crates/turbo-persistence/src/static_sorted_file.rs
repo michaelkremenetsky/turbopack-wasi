@@ -180,7 +180,8 @@ impl StaticSortedFile {
     fn open_internal(
         path: PathBuf,
         meta: StaticSortedFileMetaData,
-        sequential: bool,
+        // only used for madvise on unix; wasm has no memory-mapping advice
+        #[cfg_attr(target_family = "wasm", allow(unused_variables))] sequential: bool,
     ) -> Result<Self> {
         let file = File::open(&path)
             .with_context(|| format!("Failed to open SST file {}", path.display()))?;

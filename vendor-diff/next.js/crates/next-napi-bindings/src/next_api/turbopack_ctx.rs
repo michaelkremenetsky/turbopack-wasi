@@ -295,6 +295,10 @@ impl CompilationEvent for StartupCacheInvalidationEvent {
 static LOG_THROTTLE: Mutex<Option<Instant>> = Mutex::new(None);
 static LOG_DIVIDER: &str = "---------------------------";
 static PANIC_LOG: Lazy<PathBuf> = Lazy::new(|| {
+    // std::env::temp_dir() panics on wasi; fall back to TMPDIR (which the host controls) or /tmp.
+    #[cfg(target_family = "wasm")]
+    let mut path = PathBuf::from(env::var("TMPDIR").unwrap_or_else(|_| "/tmp".to_string()));
+    #[cfg(not(target_family = "wasm"))]
     let mut path = env::temp_dir();
     path.push(format!("next-panic-{:x}.log", rand::random::<u128>()));
     path

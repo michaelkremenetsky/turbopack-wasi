@@ -22,7 +22,17 @@ use crate::{TurboTasksApi, manager::try_turbo_tasks, turbo_tasks_scope};
 
 /// Number of worker tasks to spawn that process jobs. It's 1 less than the number of cpus as we
 /// also use the current task as worker.
-static WORKER_TASKS: Lazy<usize> = Lazy::new(|| available_parallelism().map_or(0, |n| n.get() - 1));
+static WORKER_TASKS: Lazy<usize> = Lazy::new(|| {
+    available_parallelism().map(|n| n.get() - 1).unwrap_or_else(|_| {
+        // std cannot detect parallelism on wasi; let the host specify it via env, defaulting to
+        // a small pool instead of falling back to fully sequential scopes.
+        std::env::var("TURBOPACK_PARALLELISM")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(4)
+            .saturating_sub(1)
+    })
+});
 
 enum WorkQueueJob {
     Job(usize, Box<dyn FnOnce() + Send + 'static>),

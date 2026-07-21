@@ -12,8 +12,13 @@ bench = false
 [lints]
 workspace = true
 
+[features]
+default = ["process_pool"]
+process_pool = ["next-core/process_pool"]
+worker_pool = ["next-core/worker_pool"]
+
 [dependencies]
-next-core = { workspace = true }
+next-core = { workspace = true, default-features = false }
 turbopack-core = { workspace = true }
 turbo-rcstr = { workspace = true }
 

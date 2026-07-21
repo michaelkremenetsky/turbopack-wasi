@@ -2,6 +2,11 @@
 #![feature(arbitrary_self_types)]
 #![feature(arbitrary_self_types_pointers)]
 
+#[cfg(not(target_family = "wasm"))]
+mod client;
+// reqwest does not build on wasm targets; use a stub client whose fetches resolve to errors.
+#[cfg(target_family = "wasm")]
+#[path = "client_wasm.rs"]
 mod client;
 mod error;
 mod response;

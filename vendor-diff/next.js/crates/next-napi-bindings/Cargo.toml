@@ -114,9 +114,9 @@ turbo-tasks = { workspace = true }
 turbo-tasks-backend = { workspace = true }
 turbo-tasks-fs = { workspace = true }
 turbo-unix-path = { workspace = true }
-next-api = { workspace = true, features = ["worker_pool"] }
-next-build = { workspace = true }
-next-core = { workspace = true }
+next-api = { workspace = true, features = ["process_pool", "worker_pool"] }
+next-build = { workspace = true, features = ["process_pool"] }
+next-core = { workspace = true, features = ["process_pool"] }
 
 mdxjs = { workspace = true, features = ["serializable"] }
 
@@ -139,9 +139,27 @@ windows-sys = "0.60"
 getrandom = { version = "0.2.9", default-features = false, features = ["js"] }
 iana-time-zone = { version = "*", features = ["fallback"] }
 
-mdxjs = { workspace = true }
+mdxjs = { workspace = true, features = ["serializable"] }
 
 turbo-tasks-malloc = { workspace = true, default-features = false }
+
+# parking_lot's wasm atomics thread parker (rather than a panicking stub) is nightly-gated;
+# needs >=0.9.12 for wasi support.
+parking_lot_core = { version = "0.9.12", features = ["nightly"] }
+
+turbo-rcstr = { workspace = true, features = ["napi"] }
+turbo-tasks = { workspace = true }
+turbo-tasks-backend = { workspace = true }
+turbo-tasks-fs = { workspace = true }
+turbo-unix-path = { workspace = true }
+next-api = { workspace = true, default-features = false, features = ["worker_pool"] }
+next-build = { workspace = true, default-features = false, features = ["worker_pool"] }
+next-core = { workspace = true, default-features = false, features = ["worker_pool"] }
+
+turbopack-core = { workspace = true }
+turbopack-ecmascript-hmr-protocol = { workspace = true }
+turbopack-trace-utils = { workspace = true }
+turbopack-node = { workspace = true, default-features = false, features = ["worker_pool"] }
 
 # wasi-only dependencies.
 [target.wasm32-wasip1-threads.dependencies]

@@ -298,10 +298,10 @@ debug = true
 
 [workspace.dependencies]
 # Workspace crates
-next-api = { path = "crates/next-api" }
-next-build = { path = "crates/next-build" }
+next-api = { path = "crates/next-api", default-features = false }
+next-build = { path = "crates/next-build", default-features = false }
 next-code-frame = { path = "crates/next-code-frame" }
-next-core = { path = "crates/next-core" }
+next-core = { path = "crates/next-core", default-features = false }
 next-custom-transforms = { path = "crates/next-custom-transforms", default-features = false }
 next-taskless = { path = "crates/next-taskless" }
 
@@ -503,6 +503,7 @@ vergen-gitcl = { version = "1.0.8", features = ["cargo"] }
 webbrowser = "1.0.6"
 
 [patch.crates-io]
+napi = { path = "/Users/michaelkremenetsky/Work/compiles/turbopack-wasi/vendor-crates/napi" } # turbopack-wasi fork: custom GC on wasm+atomics
 bincode = { git = "https://github.com/bgw/bincode.git", branch = "bgw/patches" }
 virtue = { git = "https://github.com/bgw/virtue.git", branch = "bgw/fix-generic-default-parsing" }
 # We have to very frequently bump the swc major version of mdxjs-rs

@@ -3,9 +3,10 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     sync::Arc,
-    thread,
     time::Duration,
 };
+#[cfg(not(target_arch = "wasm32"))]
+use std::thread;
 
 use anyhow::{Context, Result, anyhow, bail};
 use bincode::{Decode, Encode};
@@ -519,12 +520,16 @@ pub fn project_new(
                 .unwrap();
         });
 
-        let trace_server = std::env::var("NEXT_TURBOPACK_TRACE_SERVER").ok();
-        if trace_server.is_some() {
-            thread::spawn(move || {
-                turbopack_trace_server::start_turbopack_trace_server(trace_file, None);
-            });
-            println!("Turbopack trace server started. View trace at https://trace.nextjs.org");
+        // The trace server needs a TCP listener, which is unavailable on wasm targets.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let trace_server = std::env::var("NEXT_TURBOPACK_TRACE_SERVER").ok();
+            if trace_server.is_some() {
+                thread::spawn(move || {
+                    turbopack_trace_server::start_turbopack_trace_server(trace_file, None);
+                });
+                println!("Turbopack trace server started. View trace at https://trace.nextjs.org");
+            }
         }
 
         subscriber.init();

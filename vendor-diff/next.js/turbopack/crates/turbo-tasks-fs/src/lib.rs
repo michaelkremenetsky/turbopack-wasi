@@ -1,6 +1,8 @@
 #![feature(arbitrary_self_types)]
 #![feature(arbitrary_self_types_pointers)]
 #![feature(btree_cursors)] // needed for the `InvalidatorMap` and watcher, reduces time complexity
+// needed for `std::os::wasi::fs::symlink_path` on wasm32-wasi targets
+#![cfg_attr(target_os = "wasi", feature(wasi_ext))]
 #![feature(io_error_more)]
 #![feature(iter_advance_by)]
 #![feature(min_specialization)]
@@ -1229,8 +1231,10 @@ impl FileSystem for DiskFileSystem {
                             })?;
                             has_old_content = false;
                         }
-                        #[cfg(not(windows))]
+                        #[cfg(not(any(windows, target_os = "wasi")))]
                         let io_result = std::os::unix::fs::symlink(&target, &full_path);
+                        #[cfg(target_os = "wasi")]
+                        let io_result = std::os::wasi::fs::symlink_path(&target, &full_path);
                         #[cfg(windows)]
                         let io_result = if is_directory {
                             std::os::windows::fs::junction_point(&target, &full_path)

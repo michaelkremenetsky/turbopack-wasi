@@ -48,7 +48,6 @@ pub mod css;
 pub mod lockfile;
 pub mod mdx;
 pub mod minify;
-#[cfg(not(target_arch = "wasm32"))]
 pub mod next_api;
 pub mod parse;
 pub mod react_compiler;
@@ -56,7 +55,6 @@ pub mod rspack;
 pub mod transform;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod turbo_trace_server;
-#[cfg(not(target_arch = "wasm32"))]
 pub mod turbopack;
 pub mod util;
 
@@ -67,6 +65,134 @@ static ALLOC: turbo_tasks_malloc::TurboMalloc = turbo_tasks_malloc::TurboMalloc;
 #[cfg(feature = "__internal_dhat-heap")]
 #[global_allocator]
 static ALLOC: dhat::Alloc = dhat::Alloc;
+
+#[cfg(target_arch = "wasm32")]
+static WASI_RUNTIME_INSTALLED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// On wasm, napi's fallback is a current-thread tokio runtime that only advances while a napi
+/// call is blocked on it, which stalls turbo-tasks' background work. Wasm hosts MUST call this
+/// raw wasm export (`instance.exports.init_turbopack_wasi_runtime_raw(threads)`) right after
+/// instantiation and BEFORE ANY napi call: napi wraps every call in
+/// `within_runtime_if_available`, which force-initializes the fallback runtime, after which a
+/// custom runtime can no longer be installed.
+#[cfg(target_arch = "wasm32")]
+#[unsafe(no_mangle)]
+pub extern "C" fn init_turbopack_wasi_runtime_raw(worker_threads: u32) -> i32 {
+    use tokio::runtime::Builder;
+    use turbo_tasks_malloc::TurboMalloc;
+
+    let threads = (worker_threads.max(1)) as usize;
+    let rt = match Builder::new_multi_thread()
+        .worker_threads(threads)
+        // std::thread::available_parallelism is unsupported on wasi; every implicit sizing
+        // must be explicit here.
+        .max_blocking_threads(threads * 4)
+        // wasi thread stacks live in linear memory at exactly the requested size, and wasm
+        // shadow-stack frames are several times larger than native (everything spills to the
+        // stack; turbo-tasks functions inline large futures). The 2MB std/tokio default
+        // overflows nondeterministically under compile load (OOB traps at task-function
+        // entry), so give worker + blocking threads real headroom.
+        .thread_stack_size(16 * 1024 * 1024)
+        // Time only, deliberately no io driver: mio's wasi poll returns immediately instead of
+        // blocking, which turns the tokio driver park into a 100%-CPU spin. Without the io
+        // driver the runtime parks on a condvar (wasm atomics), which blocks properly. Network
+        // and fs work goes through the host (napi/emnapi) rather than tokio's io driver anyway.
+        .enable_time()
+        .on_thread_stop(|| {
+            TurboMalloc::thread_stop();
+        })
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(_) => return -1,
+    };
+    napi::bindgen_prelude::create_custom_tokio_runtime(rt);
+    WASI_RUNTIME_INSTALLED.store(true, std::sync::atomic::Ordering::SeqCst);
+    0
+}
+
+/// Verifies the wasm host installed the multi-threaded runtime (see
+/// `init_turbopack_wasi_runtime_raw`). Kept as a napi export so JS can assert the setup early
+/// with a clear error instead of deadlocking later.
+#[cfg(target_arch = "wasm32")]
+#[napi_derive::napi]
+pub fn init_turbopack_wasi_runtime(_worker_threads: Option<u32>) -> napi::Result<()> {
+    if !WASI_RUNTIME_INSTALLED.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err(napi::Error::from_reason(
+            "multi-threaded tokio runtime not installed: call the raw wasm export \
+             instance.exports.init_turbopack_wasi_runtime_raw(threads) BEFORE any napi call \
+             (napi calls force-initialize a single-threaded fallback runtime)",
+        ));
+    }
+    Ok(())
+}
+
+/// Probe: resolves after `ms` via tokio::time::sleep on the installed runtime. If this never
+/// resolves, the tokio time driver is not working on this host.
+#[cfg(target_arch = "wasm32")]
+#[napi_derive::napi]
+pub async fn debug_sleep(ms: u32) -> napi::Result<u32> {
+    tokio::time::sleep(std::time::Duration::from_millis(ms as u64)).await;
+    Ok(ms)
+}
+
+/// Probe: reads a file through tokio's blocking pool (the same path turbo-tasks-fs uses).
+#[cfg(target_arch = "wasm32")]
+#[napi_derive::napi]
+pub async fn debug_read_file(path: String) -> napi::Result<u32> {
+    let len = tokio::task::spawn_blocking(move || std::fs::read(&path).map(|v| v.len()))
+        .await
+        .map_err(|e| napi::Error::from_reason(format!("join error: {e}")))?
+        .map_err(|e| napi::Error::from_reason(format!("read error: {e}")))?;
+    Ok(len as u32)
+}
+
+/// Probe: runs a task through tokio::spawn (worker) and returns.
+#[cfg(target_arch = "wasm32")]
+#[napi_derive::napi]
+pub async fn debug_spawn(value: u32) -> napi::Result<u32> {
+    tokio::spawn(async move { value * 2 })
+        .await
+        .map_err(|e| napi::Error::from_reason(format!("join error: {e}")))
+}
+
+/// Probe: create a ThreadsafeFunction from `cb` and call it 3 times from a spawned thread.
+#[cfg(target_arch = "wasm32")]
+#[napi_derive::napi]
+pub fn debug_tsfn_echo(
+    #[napi(ts_arg_type = "(err: Error | null, value: number) => void")] cb: napi::JsFunction,
+) -> napi::Result<()> {
+    use napi::threadsafe_function::{ErrorStrategy, ThreadsafeFunctionCallMode};
+    let tsfn: napi::threadsafe_function::ThreadsafeFunction<u32, ErrorStrategy::CalleeHandled> =
+        cb.create_threadsafe_function(0, |ctx| Ok(vec![ctx.value]))?;
+    std::thread::spawn(move || {
+        for i in 0..3u32 {
+            tsfn.call(Ok(i), ThreadsafeFunctionCallMode::Blocking);
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    });
+    Ok(())
+}
+
+/// Probe: install a plain-text tracing subscriber writing to stderr, with the given env-filter
+/// (e.g. "turbo_tasks=info,next_api=debug").
+#[cfg(target_arch = "wasm32")]
+#[napi_derive::napi]
+pub fn debug_enable_tracing(filter: String) -> napi::Result<()> {
+    use tracing_subscriber::{EnvFilter, fmt, prelude::*};
+    tracing_subscriber::registry()
+        .with(
+            fmt::layer()
+                .with_writer(std::io::stderr)
+                .with_ansi(false)
+                .with_span_events(fmt::format::FmtSpan::NEW),
+        )
+        .with(EnvFilter::try_new(filter).map_err(|e| napi::Error::from_reason(e.to_string()))?)
+        .try_init()
+        .map_err(|e| napi::Error::from_reason(e.to_string()))?;
+    Ok(())
+}
 
 #[cfg(not(target_arch = "wasm32"))]
 #[napi::module_init]

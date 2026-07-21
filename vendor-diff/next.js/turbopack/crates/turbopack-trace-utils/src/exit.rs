@@ -1,9 +1,14 @@
 use std::{
     future::Future,
     pin::Pin,
-    sync::{Arc, Mutex, OnceLock},
+    sync::{Arc, Mutex},
+};
+#[cfg(not(target_family = "wasm"))]
+use std::{
+    sync::OnceLock,
 };
 
+#[cfg(not(target_family = "wasm"))]
 use anyhow::Result;
 use tokio::{select, sync::mpsc, task::JoinSet};
 
@@ -19,6 +24,9 @@ impl<T> Drop for ExitGuard<T> {
 
 impl<T: Send + 'static> ExitGuard<T> {
     /// Drop a guard when Ctrl-C is pressed or the [ExitGuard] is dropped.
+    // There are no process signals on WASI, so this API (which spawns a signal listener) is
+    // native-only. Library consumers should use `ExitHandler::new_receiver` instead.
+    #[cfg(not(target_family = "wasm"))]
     pub fn new(guard: T) -> Result<Self> {
         let guard = Arc::new(Mutex::new(Some(guard)));
         {
@@ -41,6 +49,7 @@ type BoxExitFuture = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 /// The global handler is intentionally not exposed, so that APIs that depend on exit behavior are
 /// required to take the `ExitHandler`. This ensures that the `ExitHandler` is configured before
 /// these APIs are run, and that these consumers can be used with a callback (e.g. a mock) instead.
+#[cfg(not(target_family = "wasm"))]
 static GLOBAL_EXIT_HANDLER: OnceLock<Arc<ExitHandler>> = OnceLock::new();
 
 pub struct ExitHandler {
@@ -58,6 +67,8 @@ impl ExitHandler {
     /// [`ExitHandler::new_receiver`] instead.
     ///
     /// This may listen for other signals, like `SIGTERM` or `SIGPIPE` in the future.
+    // There are no process signals on WASI; see `ExitGuard::new` above.
+    #[cfg(not(target_family = "wasm"))]
     pub fn listen() -> &'static Arc<ExitHandler> {
         let (handler, receiver) = Self::new_receiver();
         if GLOBAL_EXIT_HANDLER.set(handler).is_err() {

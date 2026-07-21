@@ -76,7 +76,49 @@ fn main() -> anyhow::Result<()> {
     }
 
     if !is_macos_target {
+    if env::var("CARGO_CFG_TARGET_OS").is_ok_and(|value| value == "wasi") {
+        // Mirrors napi_build::setup()'s wasi branch, except `--export-dynamic`: that flag
+        // exports every dynamic symbol, and this workspace produces >100k of them, exceeding
+        // V8's 100,000-export limit for wasm modules. Every `#[napi]` register function
+        // carries `#[export_name]` and is exported explicitly by rustc regardless.
+        let link_dir = env::var("EMNAPI_LINK_DIR").expect("EMNAPI_LINK_DIR must be set");
+        println!("cargo:rerun-if-env-changed=EMNAPI_LINK_DIR");
+        println!("cargo:rerun-if-env-changed=WASI_REGISTER_TMP_PATH");
+        println!("cargo:rustc-link-search={link_dir}");
+        println!("cargo:rustc-link-lib=static=emnapi-basic-mt");
+        println!("cargo:rustc-link-arg=--export=malloc");
+        println!("cargo:rustc-link-arg=--export=free");
+        println!("cargo:rustc-link-arg=--export=napi_register_wasm_v1");
+        println!("cargo:rustc-link-arg=--export-if-defined=node_api_module_get_api_version_v1");
+        println!("cargo:rustc-link-arg=--export-table");
+        println!("cargo:rustc-link-arg=--export=emnapi_async_worker_create");
+        println!("cargo:rustc-link-arg=--export=emnapi_async_worker_init");
+        println!("cargo:rustc-link-arg=--export-if-defined=wasi_thread_start");
+        println!("cargo:rustc-link-arg=--import-memory");
+        println!("cargo:rustc-link-arg=--import-undefined");
+        println!("cargo:rustc-link-arg=--max-memory=4294967296");
+        println!("cargo:rustc-link-arg=-zstack-size=6400000");
+        println!("cargo:rustc-link-arg=--no-check-features");
+        // The wasi reactor crt provides _initialize: main thread-pointer setup + C ctors.
+        // rustc links no crt for cdylibs, and without TP setup napi registration spins
+        // inside pthread_key handling. node:wasi's initialize() calls the export.
+        let rustc = env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
+        let sysroot_out = Command::new(&rustc)
+            .args(["--print", "sysroot"])
+            .output()
+            .expect("failed to run rustc --print sysroot");
+        let sysroot = str::from_utf8(&sysroot_out.stdout)
+            .expect("sysroot is not utf-8")
+            .trim()
+            .to_string();
+        let target = env::var("TARGET").expect("TARGET is not set");
+        println!(
+            "cargo:rustc-link-arg={sysroot}/lib/rustlib/{target}/lib/self-contained/crt1-reactor.o"
+        );
+        println!("cargo:rustc-link-arg=--export=_initialize");
+    } else {
         napi_build::setup();
+    }
     }
 
     // This is a workaround for napi always including a GCC-specific flag on macOS.
