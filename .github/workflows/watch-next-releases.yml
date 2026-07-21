@@ -79,15 +79,21 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y binaryen brotli
       - name: Build
         id: build
-        run: bash scripts/build.sh "v${{ matrix.version }}" 2>&1 | tee build.log
+        # pipefail: without it, `| tee` masks build.sh's exit code and a failed
+        # build sails on to the next step
+        run: |
+          set -o pipefail
+          bash scripts/build.sh "v${{ matrix.version }}" 2>&1 | tee build.log
       - name: Smoke test (primitives + transform)
         id: smoke
         run: |
+          set -o pipefail
           (cd sdk && npm install --ignore-scripts)
           node scripts/stage-test-async.mjs "$PWD/dist/v${{ matrix.version }}" 2>&1 | tee smoke.log
       - name: Real-app test (compile a page + the CSS route on next@exact-version)
         id: realapp
         run: |
+          set -o pipefail
           rm -rf fixtures/ci-app && mkdir -p fixtures/ci-app
           cp -R fixtures/hello-app/app fixtures/ci-app/app
           cp fixtures/hello-app/next.config.js fixtures/hello-app/postcss.config.js fixtures/ci-app/

@@ -13,6 +13,12 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CHECKOUT="${1:?usage: apply-patches.sh <checkout-dir> [patch-series-dir]}"
 SERIES="${2:-$ROOT/patches}"
 
+# git am / commit need a committer identity; CI runners have none configured.
+export GIT_AUTHOR_NAME="${GIT_AUTHOR_NAME:-turbopack-wasi build}"
+export GIT_AUTHOR_EMAIL="${GIT_AUTHOR_EMAIL:-build@turbopack-wasi.invalid}"
+export GIT_COMMITTER_NAME="${GIT_COMMITTER_NAME:-$GIT_AUTHOR_NAME}"
+export GIT_COMMITTER_EMAIL="${GIT_COMMITTER_EMAIL:-$GIT_AUTHOR_EMAIL}"
+
 # The bindings crate was renamed crates/napi -> crates/next-napi-bindings during 16.2.
 if [ -d "$CHECKOUT/crates/next-napi-bindings" ]; then
   BINDINGS_DIR="crates/next-napi-bindings"
