@@ -89,7 +89,10 @@ jobs:
         run: |
           set -o pipefail
           (cd sdk && npm install --ignore-scripts)
-          node scripts/stage-test-async.mjs "$PWD/dist/v${{ matrix.version }}" 2>&1 | tee smoke.log
+          # the generated index.wasi.cjs resolves @napi-rs/wasm-runtime from
+          # its own directory; in-repo the runtime lives in sdk/node_modules
+          NODE_PATH="$PWD/sdk/node_modules" \
+            node scripts/stage-test-async.mjs "$PWD/dist/v${{ matrix.version }}" 2>&1 | tee smoke.log
       - name: Real-app test (compile a page + the CSS route on next@exact-version)
         id: realapp
         run: |
