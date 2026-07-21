@@ -1,10 +1,14 @@
 # Watch npm for new next.js releases and try to build the wasi binding for them.
 #
-# Green path: patches apply -> build succeeds -> smoke test passes -> artifact
-# uploaded (publishing stays manual until the repatchable versioning scheme is
-# decided; flip PUBLISH_ON_GREEN once it is).
+# Green path: patches apply -> build succeeds -> smoke test passes -> a REAL
+# app compiles against the exact new next version (including the CSS route
+# through the worker_threads pool — runtime-only regressions like the fd-table
+# bug pass smoke tests and only fail here) -> artifact uploaded -> published to
+# npm as <version>-build.N with the moving next-<version> dist-tag, IF the
+# repo variable PUBLISH_ON_GREEN is "true" (the kill-switch). Publishing uses
+# npm OIDC trusted publishing + provenance — no long-lived token.
 #
-# Red path (patch conflict, compile error, or smoke-test failure): a GitHub
+# Red path (patch conflict, compile error, or any test failure): a GitHub
 # issue is opened with the failing step and log tail — that's the signal for a
 # human/agent session to rebase the series or add a version-specific patch.
 #
@@ -27,6 +31,7 @@ on:
 permissions:
   contents: read
   issues: write
+  id-token: write # npm OIDC trusted publishing + provenance
 
 jobs:
   find-new:
@@ -45,7 +50,13 @@ jobs:
           npm view next versions --json \
             | jq -r '.[] | select(test("^1[6-9]\\.") and (contains("-") | not))' > all.txt
           sort -o all.txt all.txt
-          sort -o built.txt built-versions.txt
+          # "Built" = the seed list committed to the repo, plus anything already
+          # on the registry (published versions are <next-version>-build.N).
+          { cat built-versions.txt
+            npm view next-swc-wasi versions --json 2>/dev/null \
+              | jq -r '(if type == "string" then [.] else . end)[]' \
+              | sed -E 's/-build\.[0-9]+$//' || true
+          } | sort -u > built.txt
           NEW=$(comm -23 all.txt built.txt | jq -R . | jq -cs .)
           echo "versions=$NEW" >> "$GITHUB_OUTPUT"
           echo "new versions: $NEW"
@@ -74,6 +85,20 @@ jobs:
         run: |
           (cd sdk && npm install --ignore-scripts)
           node scripts/stage-test-async.mjs "$PWD/dist/v${{ matrix.version }}" 2>&1 | tee smoke.log
+      - name: Real-app test (compile a page + the CSS route on next@exact-version)
+        id: realapp
+        run: |
+          rm -rf fixtures/ci-app && mkdir -p fixtures/ci-app
+          cp -R fixtures/hello-app/app fixtures/ci-app/app
+          cp fixtures/hello-app/next.config.js fixtures/hello-app/postcss.config.js fixtures/ci-app/
+          (cd fixtures/ci-app && npm init -y >/dev/null && \
+            npm install --no-audit --no-fund "next@${{ matrix.version }}" react react-dom)
+          NODE_PATH="$PWD/sdk/node_modules" \
+          WASI_NATIVE_DIR="$PWD/dist/v${{ matrix.version }}" \
+          NEXT_FIXTURE_VERSION="${{ matrix.version }}" \
+          TEST_ROUTE=/ \
+            node scripts/real-app-test.mjs fixtures/ci-app 2>&1 | tee realapp.log
+          grep -q "COMPILED and written to disk" realapp.log
       - name: Upload artifact
         if: success()
         uses: actions/upload-artifact@v4
@@ -81,6 +106,9 @@ jobs:
           name: next-swc-wasi-v${{ matrix.version }}
           path: dist/v${{ matrix.version }}
           compression-level: 0 # wasm is already brotli'd alongside
+      - name: Publish to npm (kill-switch: repo variable PUBLISH_ON_GREEN)
+        if: success() && vars.PUBLISH_ON_GREEN == 'true'
+        run: bash scripts/publish.sh "v${{ matrix.version }}"
       - name: Open issue on failure
         if: failure()
         uses: actions/github-script@v7
@@ -102,5 +130,6 @@ jobs:
                 '',
                 '<details><summary>build.log tail</summary>\n\n```\n' + tail('build.log') + '\n```\n</details>',
                 '<details><summary>smoke.log tail</summary>\n\n```\n' + tail('smoke.log') + '\n```\n</details>',
+                '<details><summary>realapp.log tail</summary>\n\n```\n' + tail('realapp.log') + '\n```\n</details>',
               ].join('\n'),
             });

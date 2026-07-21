@@ -9,3 +9,4 @@ fixtures/calcom/
 fixtures/*/node_modules/
 fixtures/*/.next/
 vendor-diff/
+fixtures/ci-app/
