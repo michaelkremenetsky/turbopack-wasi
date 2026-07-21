@@ -89,10 +89,12 @@ const { napiModule } = await rt.instantiateNapiModule(bytes, {
       ...importObject.napi,
       ...importObject.emnapi,
       memory: (globalThis.__wasiMemory = new WebAssembly.Memory({
-        // Oversized initial: memory.grow on a shared memory races V8's cached
-        // memory size in TurboFan-compiled bulk ops (spurious OOB traps), so
-        // hosts should start with enough memory that growth never happens.
-        initial: Math.max(limits.min, Number(process.env.WASI_MEM_INITIAL_PAGES ?? 8192)),
+        // Start at the module's own minimum and let it grow. (On Node 22 only:
+        // memory.grow on a shared memory races V8's cached size in
+        // TurboFan-compiled bulk ops -> rare spurious OOB traps. Preallocating
+        // via WASI_MEM_INITIAL_PAGES narrows but cannot close that window —
+        // the allocator keeps growing regardless — so the real fix is Node >= 24.)
+        initial: Math.max(limits.min, Number(process.env.WASI_MEM_INITIAL_PAGES ?? 0)),
         // WASI_MEM_MAX_PAGES: supplying a smaller max than the module declares is a
         // valid import subtype; used to probe engine behavior at the 4GB boundary.
         maximum: Number(process.env.WASI_MEM_MAX_PAGES ?? (limits.max ?? 65536)),
