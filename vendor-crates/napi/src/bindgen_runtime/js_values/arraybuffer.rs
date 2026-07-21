@@ -7,7 +7,11 @@ use std::sync::{
   Arc,
 };
 
-#[cfg(all(feature = "napi4", not(feature = "noop"), not(target_family = "wasm")))]
+#[cfg(all(
+  feature = "napi4",
+  not(feature = "noop"),
+  any(not(target_family = "wasm"), target_feature = "atomics")
+))]
 use crate::bindgen_prelude::{CUSTOM_GC_TSFN, CUSTOM_GC_TSFN_DESTROYED, THREADS_CAN_ACCESS_ENV};
 pub use crate::js_values::TypedArrayType;
 use crate::{check_status, sys, Error, Result, Status, ValueType};
@@ -80,7 +84,11 @@ macro_rules! impl_typed_array {
             if ref_.is_null() {
               return;
             }
-            #[cfg(all(feature = "napi4", not(feature = "noop"), not(target_family = "wasm")))]
+            #[cfg(all(
+  feature = "napi4",
+  not(feature = "noop"),
+  any(not(target_family = "wasm"), target_feature = "atomics")
+))]
             {
               if CUSTOM_GC_TSFN_DESTROYED.load(Ordering::SeqCst) {
                 return;
