@@ -1,0 +1,106 @@
+# Watch npm for new next.js releases and try to build the wasi binding for them.
+#
+# Green path: patches apply -> build succeeds -> smoke test passes -> artifact
+# uploaded (publishing stays manual until the repatchable versioning scheme is
+# decided; flip PUBLISH_ON_GREEN once it is).
+#
+# Red path (patch conflict, compile error, or smoke-test failure): a GitHub
+# issue is opened with the failing step and log tail — that's the signal for a
+# human/agent session to rebase the series or add a version-specific patch.
+#
+# Rationale from the v16 backfill: within a minor line the series applies with
+# zero conflicts (16.2.0..16.2.10 were byte-identical fingerprint groups), so
+# per-release review adds nothing the smoke test doesn't catch. Real work only
+# appears at minor boundaries (16.0->16.1->16.2 each needed rebases and new
+# code), which is exactly the red path.
+name: watch-next-releases
+
+on:
+  schedule:
+    - cron: "17 6 * * *" # daily
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Force-build a specific next.js version (e.g. 16.3.0)"
+        required: false
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  find-new:
+    runs-on: ubuntu-latest
+    outputs:
+      versions: ${{ steps.diff.outputs.versions }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Diff npm's stable v16+ versions against built.txt
+        id: diff
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            echo "versions=[\"${{ github.event.inputs.version }}\"]" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          npm view next versions --json \
+            | jq -r '.[] | select(test("^1[6-9]\\.") and (contains("-") | not))' > all.txt
+          sort -o all.txt all.txt
+          sort -o built.txt built-versions.txt
+          NEW=$(comm -23 all.txt built.txt | jq -R . | jq -cs .)
+          echo "versions=$NEW" >> "$GITHUB_OUTPUT"
+          echo "new versions: $NEW"
+
+  build:
+    needs: find-new
+    if: needs.find-new.outputs.versions != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.find-new.outputs.versions) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24 # >= 24: Node 22's V8 races shared-memory grow in bulk ops
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install binaryen + brotli
+        run: sudo apt-get update && sudo apt-get install -y binaryen brotli
+      - name: Build
+        id: build
+        run: bash scripts/build.sh "v${{ matrix.version }}" 2>&1 | tee build.log
+      - name: Smoke test (primitives + transform)
+        id: smoke
+        run: |
+          (cd sdk && npm install --ignore-scripts)
+          node scripts/stage-test-async.mjs "$PWD/dist/v${{ matrix.version }}" 2>&1 | tee smoke.log
+      - name: Upload artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: next-swc-wasi-v${{ matrix.version }}
+          path: dist/v${{ matrix.version }}
+          compression-level: 0 # wasm is already brotli'd alongside
+      - name: Open issue on failure
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const tail = (f) => {
+              try { return fs.readFileSync(f, 'utf8').split('\n').slice(-80).join('\n'); }
+              catch { return '(no log)'; }
+            };
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `build failed for next@${{ matrix.version }} — series needs a rebase?`,
+              labels: ['new-version-failure'],
+              body: [
+                `Automated build of next.js v${{ matrix.version }} failed.`,
+                `Run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+                '',
+                '<details><summary>build.log tail</summary>\n\n```\n' + tail('build.log') + '\n```\n</details>',
+                '<details><summary>smoke.log tail</summary>\n\n```\n' + tail('smoke.log') + '\n```\n</details>',
+              ].join('\n'),
+            });
