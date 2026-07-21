@@ -8,3 +8,4 @@ isolate-*.log
 fixtures/calcom/
 fixtures/*/node_modules/
 fixtures/*/.next/
+vendor-diff/
