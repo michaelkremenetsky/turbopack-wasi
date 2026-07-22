@@ -15,6 +15,14 @@ Install via the dist-tag for your next version:
 npm install next-swc-wasi@next-16.2.10
 ```
 
+The package carries its own engagement layer: in a Node-compatible
+wasi-threads host, `require('next-swc-wasi/auto.cjs')` once per process
+before any next code loads (e.g. `NODE_OPTIONS=--require`) and everything is
+wired — next's custom-bindings hook, the async instantiation, the
+worker-pool bridge. Stock next configs work as-is. Because these files ship
+in the version-matched package, a host runtime never needs updating when
+next internals change; fixes ride the moving dist-tag.
+
 ## What the patches do
 
 There are three series, picked by tag in `scripts/build.sh`: `patches/` for
@@ -40,6 +48,7 @@ The 16.2 series, in order:
 | 10 | misc runtime | temp_dir fallback, a thread parker for parking_lot_core 0.9.12 on nightly, parallelism plumbing |
 | 11 | next-napi-bindings | the raw pre-napi runtime-install export (see host contract below), 16MB tokio thread stacks, debug probes |
 | 12 | next-napi-bindings | hold the `.next` dist-dir lockfile unlocked on wasi (no file-locking syscall exists there; `next dev` refused to boot on the `Unsupported` error) |
+| 13 | next-core/next-api/bindings | run on stock configs: accept next's own JS-side default `turbopackPluginRuntimeStrategy: 'childProcesses'` (normalize to the worker pool) and force the in-memory turbo-tasks store (the on-disk one is broken on wasi) |
 
 The 16MB stacks in patch 11 aren't optional: wasm shadow-stack frames run
 several times larger than native, and the 2MB default overflows under compile
