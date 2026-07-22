@@ -144,5 +144,11 @@ for v in versions:
 print(".".join(map(str, best)))
 ' "$NEXT_VERSION")"
 if [ "$HIGHEST" = "$NEXT_VERSION" ]; then
-  npm dist-tag add "$PKG_NAME@$VERSION" latest
+  # Best effort: OIDC trusted-publishing credentials cover the publish itself
+  # (including its --tag) but not standalone dist-tag mutations, so in CI this
+  # 401s unless a real token is configured. `latest` is cosmetic — everything
+  # that matters resolves through the next-<version> tags — so don't fail the
+  # run over it.
+  npm dist-tag add "$PKG_NAME@$VERSION" latest \
+    || echo "WARN: could not promote $VERSION to 'latest' (no dist-tag credentials?); next-* tags are set, continuing" >&2
 fi
