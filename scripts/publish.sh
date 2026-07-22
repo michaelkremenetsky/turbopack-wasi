@@ -43,6 +43,12 @@ for v in versions:
 print(best + 1)
 PYEOF
 )"
+# Guard against a stale version list (registry read lag, or `npm view` failing
+# and defaulting to []): bump until the exact version is genuinely free, so we
+# never 403 on an already-published immutable version.
+while npm view "$PKG_NAME@$NEXT_VERSION-build.$BUILD_NUM" version >/dev/null 2>&1; do
+  BUILD_NUM=$((BUILD_NUM + 1))
+done
 VERSION="$NEXT_VERSION-build.$BUILD_NUM"
 DIST_TAG="next-$NEXT_VERSION"
 echo "publishing $PKG_NAME@$VERSION (dist-tag: $DIST_TAG)"
