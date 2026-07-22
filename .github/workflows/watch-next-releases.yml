@@ -143,7 +143,17 @@ jobs:
           compression-level: 0 # wasm is already brotli'd alongside
       - name: "Publish to npm (kill-switch: repo variable PUBLISH_ON_GREEN)"
         if: success() && vars.PUBLISH_ON_GREEN == 'true'
-        run: bash scripts/publish.sh "v${{ matrix.version }}"
+        # Parallel publishes to the same package (a backfill wave) can race the
+        # registry into a transient E409 "failed to save packument". Retrying
+        # the whole script is safe: it re-queries the registry and bumps
+        # -build.N past anything that actually landed.
+        run: |
+          for attempt in 1 2 3; do
+            bash scripts/publish.sh "v${{ matrix.version }}" && break
+            if [ "$attempt" = 3 ]; then exit 1; fi
+            echo "publish failed (attempt $attempt); retrying in 30s"
+            sleep 30
+          done
       - name: Open issue on failure
         if: failure()
         uses: actions/github-script@v7
