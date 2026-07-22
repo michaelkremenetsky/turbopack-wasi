@@ -21,12 +21,26 @@ name: watch-next-releases
 
 on:
   schedule:
-    - cron: "17 6 * * *" # daily
+    # Every 5 minutes (GitHub's minimum; fires are best-effort and can lag a
+    # few minutes). The find-new job is a ~15s registry diff that exits when
+    # nothing is new, so the frequency is nearly free — only a real new
+    # version spawns the build matrix.
+    - cron: "*/5 * * * *"
   workflow_dispatch:
     inputs:
       version:
         description: "Force-build a specific next.js version (e.g. 16.3.0)"
         required: false
+
+# Serialize scheduled runs (a build takes ~15min, longer than the poll
+# interval, and a version mid-build isn't on the registry yet — without this,
+# every poll during the build would start a duplicate). GitHub coalesces
+# queued runs in a group to one, which re-checks after the build publishes and
+# exits clean. Manual dispatches get per-version groups so backfills still
+# fan out in parallel.
+concurrency:
+  group: watch-next-releases-${{ github.event.inputs.version || 'cron' }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
