@@ -1,0 +1,41 @@
+From a279c56579683b391620bc340c16eb904f5e844d Mon Sep 17 00:00:00 2001
+From: turbopack-wasi build <build@turbopack-wasi.invalid>
+Date: Wed, 22 Jul 2026 02:06:56 -0700
+Subject: [PATCH] next-napi-bindings: hold the dist-dir lockfile unlocked on
+ wasi
+
+WASI (p1) has no file-locking syscall: std's File::try_lock always fails
+with Unsupported on wasm32-wasi, so lockfile_try_acquire_sync errored and
+next dev could not boot. Treat the opened lockfile as exclusively held on
+wasi: the host is single-tenant per filesystem namespace, so the
+cross-process exclusion an advisory lock provides cannot be violated
+there anyway.
+---
+ crates/next-napi-bindings/src/lockfile.rs | 11 ++++++++++-
+ 1 file changed, 10 insertions(+), 1 deletion(-)
+
+diff --git a/crates/next-napi-bindings/src/lockfile.rs b/crates/next-napi-bindings/src/lockfile.rs
+index 35293d8a..5eeb8661 100644
+--- a/crates/next-napi-bindings/src/lockfile.rs
++++ b/crates/next-napi-bindings/src/lockfile.rs
+@@ -82,7 +82,16 @@ pub fn lockfile_try_acquire_sync(
+         open_options.write(true).create(true).read(true);
+ 
+         let file = open_options.open(&path)?;
+-        match file.try_lock() {
++        // WASI has no file-locking syscall (std's `try_lock` always fails
++        // `Unsupported` on wasm32-wasi), so treat the opened file as
++        // exclusively held. A wasi host is single-tenant per filesystem
++        // namespace, so the cross-process exclusion the advisory lock
++        // provides cannot be violated there anyway.
++        #[cfg(target_os = "wasi")]
++        let lock_result: Result<(), TryLockError> = Ok(());
++        #[cfg(not(target_os = "wasi"))]
++        let lock_result = file.try_lock();
++        match lock_result {
+             Ok(_) => {
+                 // We have the lock - now truncate and write content
+                 file.set_len(0)?;
+-- 
+2.50.1 (Apple Git-155)
+
