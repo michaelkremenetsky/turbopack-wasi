@@ -1,0 +1,44 @@
+From 9293b3cc070f6d14b4e85fc69ba60124079229ce Mon Sep 17 00:00:00 2001
+From: michaelkremenetsky
+ <28833521+michaelkremenetsky@users.noreply.github.com>
+Date: Wed, 22 Jul 2026 04:39:26 -0700
+Subject: [PATCH 14/15] turbo-tasks-fs: skip watching nonexistent dirs on wasi
+
+On wasi, notify falls back to PollWatcher, which registers a nonexistent
+path and then reports it as an asynchronous ErrorKind::Io(NotFound) event
+(a noisy "watch error" line plus a spurious invalidation) instead of the
+synchronous ErrorKind::PathNotFound that inotify returns and
+start_watching_dir already swallows. Match the inotify semantics by
+skipping the registration; the parent directory stays watched, so
+restore_if_watched re-arms the path if it is created later.
+---
+ turbopack/crates/turbo-tasks-fs/src/watcher.rs | 13 +++++++++++++
+ 1 file changed, 13 insertions(+)
+
+diff --git a/turbopack/crates/turbo-tasks-fs/src/watcher.rs b/turbopack/crates/turbo-tasks-fs/src/watcher.rs
+index 140ecb1b..bef57c3b 100644
+--- a/turbopack/crates/turbo-tasks-fs/src/watcher.rs
++++ b/turbopack/crates/turbo-tasks-fs/src/watcher.rs
+@@ -266,6 +266,19 @@ mod non_recursive_helpers {
+     ) -> Result<()> {
+         debug_assert_ne!(dir_path, root_path);
+ 
++        // On wasi, notify falls back to `PollWatcher`, which registers a
++        // nonexistent path and then reports it as an asynchronous
++        // `ErrorKind::Io(NotFound)` event (a noisy "watch error" line plus a
++        // spurious invalidation) instead of the synchronous
++        // `ErrorKind::PathNotFound` that inotify returns and the match below
++        // swallows. Match the inotify semantics by skipping the registration;
++        // the parent directory stays watched, so `restore_if_watched` re-arms
++        // this path if it is created later.
++        #[cfg(target_os = "wasi")]
++        if !dir_path.exists() {
++            return Ok(());
++        }
++
+         match notify_watcher.watch(dir_path, RecursiveMode::NonRecursive) {
+             Ok(())
+             | Err(notify::Error {
+-- 
+2.50.1 (Apple Git-155)
+

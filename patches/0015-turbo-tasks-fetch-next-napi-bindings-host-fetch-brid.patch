@@ -1,0 +1,202 @@
+From 30d15f420806aaf273942b2ec3d0343d1147ee2e Mon Sep 17 00:00:00 2001
+From: michaelkremenetsky
+ <28833521+michaelkremenetsky@users.noreply.github.com>
+Date: Wed, 22 Jul 2026 04:39:26 -0700
+Subject: [PATCH 15/15] turbo-tasks-fetch, next-napi-bindings: host fetch
+ bridge on wasm
+
+reqwest does not build on wasm targets, so fetches (next/font's Google
+Fonts css/woff2 downloads) resolved to issues unconditionally. But the
+napi host always has an HTTP client of its own: let it register one.
+turbo-tasks-fetch gains set_wasm_fetch_bridge() and the wasm client
+delegates to it (no bridge registered keeps the old resolve-to-issue
+behavior); the binding exposes initTurbopackFetchBridge(handler), wrapping
+the JS handler in a threadsafe function the same way the other stored
+callbacks are. A handler rejection surfaces as a fetch issue on the
+requesting route, same as a network error on native.
+---
+ crates/next-napi-bindings/Cargo.toml          |  2 +
+ crates/next-napi-bindings/src/lib.rs          | 49 +++++++++++++
+ .../turbo-tasks-fetch/src/client_wasm.rs      | 68 ++++++++++++++++---
+ turbopack/crates/turbo-tasks-fetch/src/lib.rs |  2 +
+ 4 files changed, 112 insertions(+), 9 deletions(-)
+
+diff --git a/crates/next-napi-bindings/Cargo.toml b/crates/next-napi-bindings/Cargo.toml
+index e25a7d33..b294fe3c 100644
+--- a/crates/next-napi-bindings/Cargo.toml
++++ b/crates/next-napi-bindings/Cargo.toml
+@@ -150,6 +150,8 @@ parking_lot_core = { version = "0.9.12", features = ["nightly"] }
+ turbo-rcstr = { workspace = true, features = ["napi"] }
+ turbo-tasks = { workspace = true }
+ turbo-tasks-backend = { workspace = true }
++# for the host fetch bridge (reqwest does not build on wasm)
++turbo-tasks-fetch = { workspace = true }
+ turbo-tasks-fs = { workspace = true }
+ turbo-unix-path = { workspace = true }
+ next-api = { workspace = true, default-features = false, features = ["worker_pool"] }
+diff --git a/crates/next-napi-bindings/src/lib.rs b/crates/next-napi-bindings/src/lib.rs
+index 90943099..3e45dc56 100644
+--- a/crates/next-napi-bindings/src/lib.rs
++++ b/crates/next-napi-bindings/src/lib.rs
+@@ -128,6 +128,55 @@ pub fn init_turbopack_wasi_runtime(_worker_threads: Option<u32>) -> napi::Result
+     Ok(())
+ }
+ 
++/// Result object the JS fetch handler resolves with (see
++/// [`init_turbopack_fetch_bridge`]).
++#[cfg(target_arch = "wasm32")]
++#[napi_derive::napi(object)]
++pub struct TurbopackFetchBridgeResponse {
++    pub status: u32,
++    pub body: Buffer,
++}
++
++/// Registers a host fetch implementation for `turbo-tasks-fetch` (reqwest does not build on wasm
++/// targets, but the napi host always has an HTTP client of its own). Used by e.g. `next/font` to
++/// download Google Fonts css/woff2. The handler must resolve with `{ status, body }`; a rejection
++/// surfaces as a fetch issue on the requesting route (same as a network error on native), never a
++/// crash. First registration wins; later calls are no-ops.
++#[cfg(target_arch = "wasm32")]
++#[napi_derive::napi(
++    ts_args_type = "handler: (conversionError: Error | null, url: string, userAgent?: string) => \
++                    Promise<{ status: number, body: Buffer }>"
++)]
++pub fn init_turbopack_fetch_bridge(env: Env, handler: JsFunction) -> napi::Result<()> {
++    use napi::threadsafe_function::ThreadsafeFunction;
++
++    let mut tsfn: ThreadsafeFunction<(String, Option<String>)> = handler
++        .create_threadsafe_function(0, |ctx| {
++            let (url, user_agent): (String, Option<String>) = ctx.value;
++            let mut args = vec![ctx.env.create_string(&url)?.into_unknown()];
++            if let Some(ua) = user_agent {
++                args.push(ctx.env.create_string(&ua)?.into_unknown());
++            }
++            Ok(args)
++        })?;
++    // Don't keep the Node.js event loop alive for the bridge (matches the
++    // other stored callbacks).
++    let _ = tsfn.unref(&env);
++
++    turbo_tasks_fetch::set_wasm_fetch_bridge(Box::new(move |url, user_agent| {
++        let tsfn = tsfn.clone();
++        Box::pin(async move {
++            let promise: Promise<TurbopackFetchBridgeResponse> = tsfn
++                .call_async(Ok((url, user_agent)))
++                .await
++                .map_err(|e| format!("fetch bridge call failed: {e}"))?;
++            let res = promise.await.map_err(|e| format!("{e}"))?;
++            Ok((res.status as u16, res.body.to_vec()))
++        })
++    }));
++    Ok(())
++}
++
+ /// Probe: resolves after `ms` via tokio::time::sleep on the installed runtime. If this never
+ /// resolves, the tokio time driver is not working on this host.
+ #[cfg(target_arch = "wasm32")]
+diff --git a/turbopack/crates/turbo-tasks-fetch/src/client_wasm.rs b/turbopack/crates/turbo-tasks-fetch/src/client_wasm.rs
+index 523117b9..cb266e44 100644
+--- a/turbopack/crates/turbo-tasks-fetch/src/client_wasm.rs
++++ b/turbopack/crates/turbo-tasks-fetch/src/client_wasm.rs
+@@ -1,12 +1,41 @@
++use std::{future::Future, pin::Pin, sync::OnceLock};
++
+ use anyhow::Result;
+ use turbo_rcstr::RcStr;
+ use turbo_tasks::{ResolvedVc, Vc, mark_session_dependent};
+ use turbopack_core::issue::StyledString;
+ 
+-use crate::{FetchError, FetchErrorKind, FetchResult};
++use crate::{FetchError, FetchErrorKind, FetchResult, HttpResponse, HttpResponseBody};
++
++/// `(status, body)` from a bridged fetch.
++pub type WasmFetchResponse = (u16, Vec<u8>);
++
++/// A host-provided fetch implementation: `(url, user_agent) -> (status, body)`
++/// or an error string. reqwest does not build on wasm targets, but the napi
++/// host (Node, a browser runtime) always has an HTTP client of its own, so the
++/// embedder can register one here (see `next-napi-bindings`'s
++/// `init_turbopack_fetch_bridge`).
++pub type WasmFetchBridge = Box<
++    dyn Fn(
++            String,
++            Option<String>,
++        ) -> Pin<Box<dyn Future<Output = Result<WasmFetchResponse, String>> + Send>>
++        + Send
++        + Sync,
++>;
++
++static WASM_FETCH_BRIDGE: OnceLock<WasmFetchBridge> = OnceLock::new();
+ 
+-/// WASM stub for `FetchClientConfig`. reqwest does not build on wasm targets, so `fetch` always
+-/// resolves to a `FetchResult` error, which surfaces as an issue rather than a build failure.
++/// Registers the host fetch implementation. Returns `false` if a bridge was
++/// already registered (the first one wins).
++pub fn set_wasm_fetch_bridge(bridge: WasmFetchBridge) -> bool {
++    WASM_FETCH_BRIDGE.set(bridge).is_ok()
++}
++
++/// WASM `FetchClientConfig`. reqwest does not build on wasm targets, so
++/// fetches are delegated to the host through the registered
++/// [`WasmFetchBridge`]; without one, every fetch resolves to a `FetchResult`
++/// error, which surfaces as an issue rather than a build failure.
+ #[turbo_tasks::value(shared)]
+ #[derive(Hash, Default)]
+ pub struct FetchClientConfig {}
+@@ -17,16 +46,37 @@ impl FetchClientConfig {
+     pub async fn fetch(
+         self: Vc<FetchClientConfig>,
+         url: RcStr,
+-        _user_agent: Option<RcStr>,
++        user_agent: Option<RcStr>,
+     ) -> Result<Vc<FetchResult>> {
+         mark_session_dependent();
+-        Ok(Vc::cell(Err(FetchError {
+-            detail: StyledString::Text("HTTP fetching is not supported on WASM targets".into())
++
++        let Some(bridge) = WASM_FETCH_BRIDGE.get() else {
++            return Ok(Vc::cell(Err(FetchError {
++                detail: StyledString::Text(
++                    "HTTP fetching is not supported on WASM targets (no host fetch bridge \
++                     registered)"
++                        .into(),
++                )
+                 .resolved_cell(),
+-            url: ResolvedVc::cell(url),
+-            kind: FetchErrorKind::Other.resolved_cell(),
++                url: ResolvedVc::cell(url),
++                kind: FetchErrorKind::Other.resolved_cell(),
++            }
++            .resolved_cell())));
++        };
++
++        match bridge(url.to_string(), user_agent.map(|ua| ua.to_string())).await {
++            Ok((status, body)) => Ok(Vc::cell(Ok(HttpResponse {
++                status,
++                body: HttpResponseBody(body).resolved_cell(),
++            }
++            .resolved_cell()))),
++            Err(detail) => Ok(Vc::cell(Err(FetchError {
++                detail: StyledString::Text(detail.into()).resolved_cell(),
++                url: ResolvedVc::cell(url),
++                kind: FetchErrorKind::Other.resolved_cell(),
++            }
++            .resolved_cell()))),
+         }
+-        .resolved_cell())))
+     }
+ }
+ 
+diff --git a/turbopack/crates/turbo-tasks-fetch/src/lib.rs b/turbopack/crates/turbo-tasks-fetch/src/lib.rs
+index fdc7e9e9..0da6722a 100644
+--- a/turbopack/crates/turbo-tasks-fetch/src/lib.rs
++++ b/turbopack/crates/turbo-tasks-fetch/src/lib.rs
+@@ -19,3 +19,5 @@ pub use crate::{
+     error::{FetchError, FetchErrorKind, FetchIssue},
+     response::{FetchResult, HttpResponse, HttpResponseBody},
+ };
++#[cfg(target_family = "wasm")]
++pub use crate::client::{WasmFetchBridge, WasmFetchResponse, set_wasm_fetch_bridge};
+-- 
+2.50.1 (Apple Git-155)
+

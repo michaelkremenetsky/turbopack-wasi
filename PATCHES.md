@@ -19,7 +19,7 @@ The 16.2 series, in order:
 | 3 | turbo-rcstr | drop the `compile_error!` blocking the napi feature on wasm (the impl is just String delegation) |
 | 4 | turbo-persistence | `usize_from_u32`: allow 32-bit targets (`<=` instead of `<`) |
 | 5 | turbo-tasks-fs | wasi symlinks via `std::os::wasi::fs::symlink_path` |
-| 6 | turbo-tasks-fetch | stub the fetch client on wasm (reqwest doesn't build); fetches resolve to issues |
+| 6 | turbo-tasks-fetch | stub the fetch client on wasm (reqwest doesn't build); fetches resolve to issues (patch 15 later adds a real client via the host) |
 | 7 | next-api/build/core | make `process_pool` (child processes + TCP, impossible on wasi) an opt-out feature; wasi uses the `worker_pool` (worker_threads) backend instead |
 | 8 | next-napi-bindings | actually enable the turbopack/next-api napi modules on wasm32 |
 | 9 | next-napi-bindings | link fixes: drop `--export-dynamic` (the binding has >100k symbols, which blows V8's wasm export limit and bloated the binary 182MB->105MB), link `crt1-reactor.o`, export `_initialize` |
@@ -27,6 +27,8 @@ The 16.2 series, in order:
 | 11 | next-napi-bindings | the raw pre-napi runtime-install export (see the host contract below), 16MB tokio thread stacks, debug probes |
 | 12 | next-napi-bindings | hold the `.next` dist-dir lockfile unlocked on wasi (there's no file-locking syscall there and `next dev` refused to boot on the `Unsupported` error) |
 | 13 | next-core/next-api/bindings | run on stock configs: accept next's own JS-side default `turbopackPluginRuntimeStrategy: 'childProcesses'` (normalize it to the worker pool) and force the in-memory turbo-tasks store, since the on-disk one is broken on wasi |
+| 14 | turbo-tasks-fs | skip watching nonexistent dirs on wasi. notify's PollWatcher fallback reports them as async Io error events ("watch error" spam + spurious invalidations); inotify's synchronous PathNotFound was already swallowed, so match that |
+| 15 | turbo-tasks-fetch/bindings | host fetch bridge on wasm: `initTurbopackFetchBridge(handler)` lets the loader register a node http client, so `next/font` Google Fonts downloads work. No handler registered keeps the resolve-to-issue behavior from patch 6 |
 
 About those 16MB stacks in patch 11: not optional. Wasm shadow-stack frames
 run several times larger than native and the 2MB default overflows under

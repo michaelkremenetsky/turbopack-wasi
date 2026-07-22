@@ -37,16 +37,62 @@ if (!globalThis.__nextSwcWasiAuto) {
   }
 
   const SWC_SUFFIX = ['next', 'dist', 'build', 'swc', 'index.js'].join('/');
+  const LOG_SUFFIX = ['next', 'dist', 'build', 'output', 'log.js'].join('/');
   const origLoad = Module._load;
   Module._load = function (request, parent, isMain) {
     const exportsObj = origLoad.apply(this, arguments);
-    // Cheap gate before any resolution work: every specifier for the target
-    // module mentions "swc" ("./swc", "../../build/swc", "next/dist/build/swc").
+    // Cheap gates before any resolution work: every specifier for the swc
+    // module mentions "swc" ("./swc", "../../build/swc",
+    // "next/dist/build/swc"); every specifier for the log module mentions
+    // "log" ("../output/log", "next/dist/build/output/log").
+    if (typeof request !== 'string' || exportsObj === null || typeof exportsObj !== 'object') {
+      return exportsObj;
+    }
+
+    // next's loadBindings() unconditionally warns "next-swc does not have
+    // native bindings ... Turbopack will not be available" on wasm32 before
+    // it ever consults the custom-bindings hook — false here, since this
+    // package IS a Turbopack-enabled binding. The compiled log module's
+    // exports are non-configurable getters, so filter through a Proxy swapped
+    // into the require cache (callers read `_log.warn` per call).
     if (
-      typeof request !== 'string' ||
+      request.indexOf('log') !== -1 &&
+      typeof exportsObj.warn === 'function' &&
+      !exportsObj.__nextSwcWasiWrapped
+    ) {
+      let logFilename;
+      try {
+        logFilename = Module._resolveFilename(request, parent, isMain);
+      } catch {
+        logFilename = null;
+      }
+      if (typeof logFilename === 'string' && logFilename.endsWith(LOG_SUFFIX)) {
+        const wrappedLog = new Proxy(exportsObj, {
+          get(target, prop, receiver) {
+            if (prop === '__nextSwcWasiWrapped') return true;
+            if (prop === 'warn') {
+              return function warn(...args) {
+                if (
+                  typeof args[0] === 'string' &&
+                  args[0].indexOf('next-swc does not have native bindings') !== -1
+                ) {
+                  return;
+                }
+                return target.warn(...args);
+              };
+            }
+            return Reflect.get(target, prop, receiver);
+          },
+        });
+        const cachedLog = Module._cache && Module._cache[logFilename];
+        if (cachedLog) cachedLog.exports = wrappedLog;
+        return wrappedLog;
+      }
+      return exportsObj;
+    }
+
+    if (
       request.indexOf('swc') === -1 ||
-      exportsObj === null ||
-      typeof exportsObj !== 'object' ||
       typeof exportsObj.loadBindings !== 'function' ||
       exportsObj.__nextSwcWasiWrapped
     ) {

@@ -187,6 +187,60 @@ if (IN_POOL_WORKER) {
         raw.initTurbopackWasiRuntime(threads);
       }
 
+      // Host fetch bridge: turbo-tasks-fetch has no HTTP client on wasm
+      // (reqwest doesn't build), so the binding delegates fetches (next/font's
+      // Google Fonts css/woff2 downloads) to this callback. Plain node
+      // http/https so it works on any host; rejections surface as fetch
+      // issues on the requesting route, same as a network error on native.
+      // (CalleeHandled tsfn: first arg is a conversion error, always null in
+      // practice.)
+      if (typeof raw.initTurbopackFetchBridge === 'function') {
+        const fetchOnce = (url, userAgent, redirectsLeft) =>
+          new Promise((resolve, reject) => {
+            let u;
+            try {
+              u = new URL(url);
+            } catch (err) {
+              return reject(err);
+            }
+            const mod = u.protocol === 'http:' ? require('http') : require('https');
+            const req = mod.request(
+              {
+                protocol: u.protocol,
+                hostname: u.hostname,
+                port: u.port || undefined,
+                path: u.pathname + u.search,
+                method: 'GET',
+                headers: userAgent ? { 'user-agent': userAgent } : {},
+              },
+              (res) => {
+                const status = res.statusCode || 0;
+                if (status >= 300 && status < 400 && res.headers.location && redirectsLeft > 0) {
+                  res.resume();
+                  return resolve(
+                    fetchOnce(
+                      new URL(res.headers.location, url).toString(),
+                      userAgent,
+                      redirectsLeft - 1
+                    )
+                  );
+                }
+                const chunks = [];
+                res.on('data', (c) => chunks.push(c));
+                res.on('end', () => resolve({ status, body: Buffer.concat(chunks) }));
+                res.on('error', reject);
+              }
+            );
+            req.on('error', reject);
+            req.end();
+          });
+        raw.initTurbopackFetchBridge((conversionError, url, userAgent) => {
+          if (conversionError) return Promise.reject(conversionError);
+          dbg('fetch bridge:', url);
+          return fetchOnce(url, userAgent, 5);
+        });
+      }
+
       // Graft the bindings onto THIS module's exports (the CJS cache means
       // next's loadNative() require of binding.cjs sees the same object).
       Object.assign(module.exports, raw);
