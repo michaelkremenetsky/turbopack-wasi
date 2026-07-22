@@ -116,11 +116,23 @@ jobs:
           cp fixtures/hello-app/next.config.js fixtures/hello-app/postcss.config.js fixtures/ci-app/
           (cd fixtures/ci-app && npm init -y >/dev/null && \
             npm install --no-audit --no-fund "next@${{ matrix.version }}" react react-dom)
-          NODE_PATH="$PWD/sdk/node_modules" \
-          WASI_NATIVE_DIR="$PWD/dist/v${{ matrix.version }}" \
-          NEXT_FIXTURE_VERSION="${{ matrix.version }}" \
-          TEST_ROUTE=/ \
-            node scripts/real-app-test.mjs fixtures/ci-app 2>&1 | tee realapp.log
+          # Even Node 26 very occasionally loses the V8 shared-memory-grow race
+          # under compile load ("memory access out of bounds" in a worker, see
+          # README "Use Node 26+"). Retry once on exactly that signature so a
+          # known flake doesn't file a spurious issue and strand the version
+          # unpublished; any other failure still fails immediately.
+          for attempt in 1 2; do
+            NODE_PATH="$PWD/sdk/node_modules" \
+            WASI_NATIVE_DIR="$PWD/dist/v${{ matrix.version }}" \
+            NEXT_FIXTURE_VERSION="${{ matrix.version }}" \
+            TEST_ROUTE=/ \
+              node scripts/real-app-test.mjs fixtures/ci-app 2>&1 | tee realapp.log \
+              && break
+            if [ "$attempt" = 2 ] || ! grep -q "memory access out of bounds" realapp.log; then
+              exit 1
+            fi
+            echo "retrying: known V8 shared-memory flake"
+          done
           grep -q "COMPILED and written to disk" realapp.log
       - name: Upload artifact
         if: success()
