@@ -1,0 +1,103 @@
+From 192061bd4868bf7080fc0b5421c2df21d948c720 Mon Sep 17 00:00:00 2001
+From: turbopack-wasi build <build@turbopack-wasi.invalid>
+Date: Wed, 22 Jul 2026 02:48:34 -0700
+Subject: [PATCH] next-core/next-api/next-napi-bindings: run on stock configs
+ when the process pool is compiled out
+
+Two config values otherwise require every project to be edited before the
+wasi build can run:
+
+- experimental.turbopackPluginRuntimeStrategy: next's JS fills its own
+  default 'childProcesses' into the resolved config, and a build without
+  the process_pool feature rejected that at deserialization. Accept it as
+  a compatibility variant and normalize it to the worker pool.
+
+- the on-disk turbo-tasks persistence store (default ON for dev from 16.2)
+  is not functional on wasi; force the in-memory noop backing storage
+  there regardless of isPersistentCachingEnabled.
+---
+ crates/next-api/src/project.rs                |  4 ++++
+ crates/next-core/src/next_config.rs           | 24 ++++++++++++++++---
+ .../src/next_api/turbopack_ctx.rs             |  8 +++++++
+ 3 files changed, 33 insertions(+), 3 deletions(-)
+
+diff --git a/crates/next-api/src/project.rs b/crates/next-api/src/project.rs
+index 243b7aad..1e6f8ad7 100644
+--- a/crates/next-api/src/project.rs
++++ b/crates/next-api/src/project.rs
+@@ -1241,6 +1241,10 @@ impl Project {
+             TurbopackPluginRuntimeStrategy::WorkerThreads => worker_threads_backend(),
+             #[cfg(feature = "process_pool")]
+             TurbopackPluginRuntimeStrategy::ChildProcesses => child_process_backend(),
++            // Normalized away in turbopack_plugin_runtime_strategy(); kept for
++            // match exhaustiveness.
++            #[cfg(all(feature = "worker_pool", not(feature = "process_pool")))]
++            TurbopackPluginRuntimeStrategy::ChildProcessesUnsupported => worker_threads_backend(),
+         };
+ 
+         let node_execution_chunking_context = Vc::upcast(
+diff --git a/crates/next-core/src/next_config.rs b/crates/next-core/src/next_config.rs
+index aa728701..de9d701f 100644
+--- a/crates/next-core/src/next_config.rs
++++ b/crates/next-core/src/next_config.rs
+@@ -928,6 +928,14 @@ pub enum TurbopackPluginRuntimeStrategy {
+     WorkerThreads,
+     #[cfg(feature = "process_pool")]
+     ChildProcesses,
++    /// Compatibility variant for builds without the process pool (wasi):
++    /// `childProcesses` is the JS-side default that next always sends in the
++    /// resolved config, so a build that cannot spawn child processes must
++    /// still accept it (and runs the worker pool instead) rather than fail
++    /// config deserialization.
++    #[cfg(all(feature = "worker_pool", not(feature = "process_pool")))]
++    #[serde(rename = "childProcesses")]
++    ChildProcessesUnsupported,
+ }
+ 
+ #[derive(
+@@ -2091,10 +2099,20 @@ impl NextConfig {
+         #[cfg(all(feature = "worker_pool", not(feature = "process_pool")))]
+         let default = TurbopackPluginRuntimeStrategy::WorkerThreads;
+ 
+-        self.experimental
++        let strategy = self
++            .experimental
+             .turbopack_plugin_runtime_strategy
+-            .unwrap_or(default)
+-            .cell()
++            .unwrap_or(default);
++        // Normalize the compatibility variant (see its doc comment) so every
++        // consumer only ever observes a runnable strategy.
++        #[cfg(all(feature = "worker_pool", not(feature = "process_pool")))]
++        let strategy = match strategy {
++            TurbopackPluginRuntimeStrategy::ChildProcessesUnsupported => {
++                TurbopackPluginRuntimeStrategy::WorkerThreads
++            }
++            other => other,
++        };
++        strategy.cell()
+     }
+ 
+     #[turbo_tasks::function]
+diff --git a/crates/next-napi-bindings/src/next_api/turbopack_ctx.rs b/crates/next-napi-bindings/src/next_api/turbopack_ctx.rs
+index df15d6b6..0d30e21b 100644
+--- a/crates/next-napi-bindings/src/next_api/turbopack_ctx.rs
++++ b/crates/next-napi-bindings/src/next_api/turbopack_ctx.rs
+@@ -216,6 +216,14 @@ pub fn create_turbo_tasks(
+     is_ci: bool,
+     is_short_session: bool,
+ ) -> Result<NextTurboTasks> {
++    // The on-disk persistence store is not functional on wasi (write-batch
++    // concurrency assertions trip under the worker-thread pool); always run
++    // the in-memory (noop) backing storage there, whatever the config says.
++    #[cfg(target_os = "wasi")]
++    let persistent_caching = {
++        let _ = persistent_caching;
++        false
++    };
+     Ok(if persistent_caching {
+         let version_info = GitVersionInfo {
+             describe: env!("VERGEN_GIT_DESCRIBE"),
+-- 
+2.50.1 (Apple Git-155)
+

@@ -59,6 +59,11 @@ mkdir -p "$STAGE"
 cp "$DIST"/index.wasm32-wasi.wasm "$DIST"/index.wasi.cjs "$DIST"/index.wasi-browser.js \
    "$DIST"/wasi-worker.mjs "$DIST"/wasi-worker-browser.mjs "$DIST"/index.d.ts \
    "$DIST"/index.js "$DIST"/browser.js "$STAGE"/ 2>/dev/null || true
+# The self-contained loader trio (pkg/): auto.cjs (one-require engagement for
+# host runtimes), binding.cjs (next's custom-bindings entry), loader.cjs (the
+# async instantiation + pool-worker RPC bridge). Version-matched to next by
+# living in this package.
+cp "$ROOT"/pkg/auto.cjs "$ROOT"/pkg/binding.cjs "$ROOT"/pkg/loader.cjs "$STAGE"/
 
 cat > "$STAGE/package.json" <<EOF
 {
@@ -93,11 +98,19 @@ newest build):
     npm install $PKG_NAME@$DIST_TAG
 
 Built from vercel/next.js $TAG plus a small wasi patch series
-(https://github.com/michaelkremenetsky/turbopack-wasi). Requires a
-wasi-threads host (shared memory + workers), async instantiation, Node >= 24
-(Node 22's V8 has a shared-memory grow race), calling the raw wasm export
-\`init_turbopack_wasi_runtime_raw(threads)\` before any napi call, and
-\`experimental.turbopackPluginRuntimeStrategy: 'workerThreads'\` in next.config.
+(https://github.com/michaelkremenetsky/turbopack-wasi).
+
+In a Node-compatible wasi-threads host, \`require('next-swc-wasi/auto.cjs')\`
+once per process BEFORE any next code loads and everything is wired
+automatically (next's custom-bindings hook, async instantiation, the
+worker-pool bridge). Stock next configs work as-is: the build normalizes the
+'childProcesses' plugin-runtime default to its worker pool and forces the
+in-memory turbo-tasks store.
+
+Embedding manually instead: async instantiation only, call the raw wasm
+export \`init_turbopack_wasi_runtime_raw(threads)\` before any napi call.
+Host needs shared memory + workers; on plain Node use Node >= 26 (older V8
+has a shared-memory grow race).
 EOF
 
 # In CI, attach provenance (requires OIDC trusted publishing or a
