@@ -78,9 +78,9 @@ cat > "$STAGE/package.json" <<EOF
   "repository": { "type": "git", "url": "git+https://github.com/michaelkremenetsky/turbopack-wasi.git" },
   "engines": { "node": ">=20" },
   "dependencies": {
-    "@napi-rs/wasm-runtime": "^1.1.6",
-    "@emnapi/core": "^1.11.2",
-    "@emnapi/runtime": "^1.11.2"
+    "@napi-rs/wasm-runtime": "~1.1.6",
+    "@emnapi/core": "~1.11.2",
+    "@emnapi/runtime": "~1.11.2"
   }
 }
 EOF
