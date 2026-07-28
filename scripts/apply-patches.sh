@@ -26,8 +26,31 @@ else
   BINDINGS_DIR="crates/napi"
 fi
 
-ls "$SERIES"/*.patch | grep -v '0009-next-napi-bindings-fix-wasi-linking' | \
-  xargs git -C "$CHECKOUT" am --3way
+# Per-patch apply with a fuzzy fallback. `git am --3way` alone can't absorb
+# context drift here: CI's vendor checkout is shallow+blobless, and a patch's
+# preimage blobs often only ever existed in the authoring tree (files already
+# modified by earlier patches in the series), so 3way has nothing to merge
+# against and any pure context-line shift between tags in a series' range
+# fails the whole build. Those shifts are exactly what patch(1) fuzz handles;
+# the changed lines themselves still have to match, real conflicts still fail
+# (loudly, with .rej files), and the result is compile-checked by the build.
+for p in $(ls "$SERIES"/*.patch | grep -v '0009-next-napi-bindings-fix-wasi-linking'); do
+  if ! git -C "$CHECKOUT" am --3way "$p" >/dev/null 2>&1; then
+    git -C "$CHECKOUT" am --quit >/dev/null 2>&1 || true
+    echo "am failed for $(basename "$p"); retrying with patch --fuzz=3" >&2
+    (cd "$CHECKOUT" && patch -p1 -E --forward --fuzz=3 --no-backup-if-mismatch < "$p") || {
+      echo "fuzzy apply also failed for $(basename "$p")" >&2
+      exit 2
+    }
+    if find "$CHECKOUT" -name '*.rej' | grep -q .; then
+      echo "fuzzy apply left rejects for $(basename "$p"):" >&2
+      find "$CHECKOUT" -name '*.rej' >&2
+      exit 2
+    fi
+    git -C "$CHECKOUT" add -A --sparse
+    git -C "$CHECKOUT" commit -q -m "$(sed -n 's/^Subject: \[PATCH[^]]*\] //p' "$p" | head -1) (fuzzy apply)"
+  fi
+done
 
 python3 - "$CHECKOUT/$BINDINGS_DIR/build.rs" <<'PYEOF'
 import re, sys
@@ -122,12 +145,12 @@ PYEOF
 git -C "$CHECKOUT" add "$BINDINGS_DIR/build.rs"
 git -C "$CHECKOUT" commit -q -m "next-napi-bindings: wasi linking fixes (scripted apply)" || true
 
-# Pre-16.2 series: the wasi_stubs module registration in turbopack-node/src/lib.rs
+# Pre-16.2 series: the host_pool module registration in turbopack-node/src/lib.rs
 # is scripted (anchored on `mod pool;`) because the surrounding module list drifts
-# across tags. The stub file itself lands via the 0007 patch.
+# across tags. The bridge itself lands via the 0016 patch.
 TPN_LIB="$CHECKOUT/turbopack/crates/turbopack-node/src/lib.rs"
-if [ -f "$CHECKOUT/turbopack/crates/turbopack-node/src/wasi_stubs.rs" ] && \
-   ! grep -q "mod wasi_stubs" "$TPN_LIB"; then
+if [ -f "$CHECKOUT/turbopack/crates/turbopack-node/src/host_pool.rs" ] && \
+   ! grep -q "mod host_pool" "$TPN_LIB"; then
   python3 - "$TPN_LIB" <<'PYEOF'
 import sys
 
@@ -138,16 +161,18 @@ if anchor not in src:
     sys.exit("could not find `mod pool;` in turbopack-node/src/lib.rs")
 block = (
     anchor
-    + "// Type-compatible stand-ins for tokio's process/net APIs (which don't exist on\n"
-    + "// wasi) so the child-process pool compiles there; spawning fails at runtime.\n"
+    + "// Host-bridged stand-ins for tokio's process/net APIs (which don't exist on\n"
+    + "// wasi): the napi host registers child_process/net callbacks through the\n"
+    + "// binding and the child-process pool runs unchanged over them. Without a\n"
+    + "// registered bridge, spawning fails at runtime with Unsupported.\n"
     + '#[cfg(target_family = "wasm")]\n'
-    + "mod wasi_stubs;\n"
+    + "pub mod host_pool;\n"
 )
 open(path, "w").write(src.replace(anchor, block, 1))
 print("turbopack-node lib.rs patched (scripted)")
 PYEOF
-  git -C "$CHECKOUT" add "$TPN_LIB"
-  git -C "$CHECKOUT" commit -q -m "turbopack-node: register wasi_stubs module (scripted apply)" || true
+  git -C "$CHECKOUT" add --sparse "$TPN_LIB"
+  git -C "$CHECKOUT" commit -q -m "turbopack-node: register host_pool module (scripted apply)" || true
 fi
 
 # Point the workspace at our napi fork (vendor-crates/napi): upstream napi-rs

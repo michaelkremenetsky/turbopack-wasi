@@ -1,9 +1,9 @@
-From 0be0c4353ceec24b3a0403669a61930afb0c21d5 Mon Sep 17 00:00:00 2001
+From c77d188369876a0607eea413ebc5c2a25ba783d8 Mon Sep 17 00:00:00 2001
 From: michaelkremenetsky
  <28833521+michaelkremenetsky@users.noreply.github.com>
 Date: Thu, 16 Jul 2026 10:49:18 -0700
-Subject: [PATCH] next-napi-bindings: define clock() for wasi (zstd dictionary
- builder references it)
+Subject: [PATCH 13/16] next-napi-bindings: define clock() for wasi (zstd
+ dictionary builder references it)
 
 wasi-libc has no ISO C clock(); zstd's cover/fastcover/zdict progress
 display calls it, and --import-undefined otherwise turns it into an
@@ -13,10 +13,10 @@ env.clock import no host provides.
  1 file changed, 11 insertions(+)
 
 diff --git a/crates/napi/src/lib.rs b/crates/napi/src/lib.rs
-index 7f41be26..b2ffb738 100644
+index 3561af9bc527cd97848ef4a9e495928775fe03e8..79e727a63f1a6f2ccc6af8ee1162a623dd8d260a 100644
 --- a/crates/napi/src/lib.rs
 +++ b/crates/napi/src/lib.rs
-@@ -193,6 +193,17 @@ pub fn debug_enable_tracing(filter: String) -> napi::Result<()> {
+@@ -196,6 +196,17 @@ pub fn debug_enable_tracing(filter: String) -> napi::Result<()> {
      Ok(())
  }
  

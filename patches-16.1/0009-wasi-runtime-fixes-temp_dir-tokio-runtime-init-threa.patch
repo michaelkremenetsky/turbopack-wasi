@@ -1,8 +1,8 @@
-From 0874a161ebe2c222a4c47e9302379490a82191be Mon Sep 17 00:00:00 2001
+From 4e17737c40a5d854a9d1fb32669982278fa12822 Mon Sep 17 00:00:00 2001
 From: michaelkremenetsky
  <28833521+michaelkremenetsky@users.noreply.github.com>
 Date: Thu, 16 Jul 2026 06:22:25 -0700
-Subject: [PATCH 09/12] wasi runtime fixes: temp_dir, tokio runtime init,
+Subject: [PATCH 09/16] wasi runtime fixes: temp_dir, tokio runtime init,
  thread parker, parallelism
 
 - PANIC_LOG used std::env::temp_dir(), which panics on wasi; fall back to
@@ -25,7 +25,7 @@ Subject: [PATCH 09/12] wasi runtime fixes: temp_dir, tokio runtime init,
  5 files changed, 52 insertions(+), 2 deletions(-)
 
 diff --git a/crates/napi/Cargo.toml b/crates/napi/Cargo.toml
-index 56c27cd0..48c89c39 100644
+index 56c27cd0648be5234d3369849e03e88ed5114e73..48c89c398e5b54e54e25b9aa22a62a9b89200822 100644
 --- a/crates/napi/Cargo.toml
 +++ b/crates/napi/Cargo.toml
 @@ -137,6 +137,10 @@ mdxjs = { workspace = true, features = ["serializable"] }
@@ -40,7 +40,7 @@ index 56c27cd0..48c89c39 100644
  turbo-tasks = { workspace = true }
  turbo-tasks-backend = { workspace = true }
 diff --git a/crates/napi/src/lib.rs b/crates/napi/src/lib.rs
-index 6ebef31b..ef8e2a03 100644
+index 6ebef31b4db8817e4e2cadc4aaab92b2859501eb..ef8e2a03e5ca091d98ad8345597dc0423cc1a0a9 100644
 --- a/crates/napi/src/lib.rs
 +++ b/crates/napi/src/lib.rs
 @@ -65,6 +65,34 @@ static ALLOC: turbo_tasks_malloc::TurboMalloc = turbo_tasks_malloc::TurboMalloc;
@@ -79,7 +79,7 @@ index 6ebef31b..ef8e2a03 100644
  #[napi::module_init]
  fn init() {
 diff --git a/crates/napi/src/next_api/turbopack_ctx.rs b/crates/napi/src/next_api/turbopack_ctx.rs
-index 7712c853..384dbc1c 100644
+index 7712c853d919dcb4b9766238653a9bedc09f1ca6..384dbc1cbe0a31e9e27b11af46baabef4342e330 100644
 --- a/crates/napi/src/next_api/turbopack_ctx.rs
 +++ b/crates/napi/src/next_api/turbopack_ctx.rs
 @@ -265,6 +265,10 @@ impl CompilationEvent for StartupCacheInvalidationEvent {
@@ -94,7 +94,7 @@ index 7712c853..384dbc1c 100644
      path.push(format!("next-panic-{:x}.log", rand::random::<u128>()));
      path
 diff --git a/turbopack/crates/turbo-tasks/src/scope.rs b/turbopack/crates/turbo-tasks/src/scope.rs
-index ff4fc5b6..40f0db25 100644
+index ff4fc5b69d7e9f1f168f4f25eb2da47b54c6c56d..40f0db25de49b3daa9250a78bfe6c640682dd401 100644
 --- a/turbopack/crates/turbo-tasks/src/scope.rs
 +++ b/turbopack/crates/turbo-tasks/src/scope.rs
 @@ -22,7 +22,17 @@ use crate::{TurboTasksApi, manager::try_turbo_tasks, turbo_tasks_scope};
@@ -117,7 +117,7 @@ index ff4fc5b6..40f0db25 100644
  enum WorkQueueJob {
      Job(usize, Box<dyn FnOnce() + Send + 'static>),
 diff --git a/turbopack/crates/turbopack-trace-utils/src/exit.rs b/turbopack/crates/turbopack-trace-utils/src/exit.rs
-index 848054f4..5d89f7c7 100644
+index 848054f4ae1c0ed807fb03a6b87c4b158fca5c07..5d89f7c769eb888a2925607d8db97f52cdc36095 100644
 --- a/turbopack/crates/turbopack-trace-utils/src/exit.rs
 +++ b/turbopack/crates/turbopack-trace-utils/src/exit.rs
 @@ -1,7 +1,11 @@

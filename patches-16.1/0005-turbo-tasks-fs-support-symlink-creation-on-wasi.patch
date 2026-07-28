@@ -1,8 +1,8 @@
-From 8bfa2d387aee402d9da04089298cf8c2c9c3fb64 Mon Sep 17 00:00:00 2001
+From 7c7a277321df6190827942f384a8cc4339abc003 Mon Sep 17 00:00:00 2001
 From: michaelkremenetsky
  <28833521+michaelkremenetsky@users.noreply.github.com>
 Date: Thu, 16 Jul 2026 03:31:29 -0700
-Subject: [PATCH 05/12] turbo-tasks-fs: support symlink creation on wasi
+Subject: [PATCH 05/16] turbo-tasks-fs: support symlink creation on wasi
 
 Use std::os::wasi::fs::symlink_path (nightly wasi_ext) where the unix
 symlink API was assumed. The notify-based watcher already builds on wasi
@@ -12,7 +12,7 @@ via notify's PollWatcher fallback.
  1 file changed, 7 insertions(+), 1 deletion(-)
 
 diff --git a/turbopack/crates/turbo-tasks-fs/src/lib.rs b/turbopack/crates/turbo-tasks-fs/src/lib.rs
-index d58f9920..9d14d2ab 100644
+index d58f9920d3438dc68babd4ddf517969d9ee55eeb..9d14d2ab9651007de8944f8f926635e2d3242417 100644
 --- a/turbopack/crates/turbo-tasks-fs/src/lib.rs
 +++ b/turbopack/crates/turbo-tasks-fs/src/lib.rs
 @@ -1,6 +1,8 @@

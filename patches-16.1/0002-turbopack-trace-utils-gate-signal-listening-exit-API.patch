@@ -1,8 +1,8 @@
-From c79a1ab5b26858b6e84b269203146d088e155254 Mon Sep 17 00:00:00 2001
+From e5b5d73f5a5a5720f7f8a1ab08c0a488a0f8d56b Mon Sep 17 00:00:00 2001
 From: michaelkremenetsky
  <28833521+michaelkremenetsky@users.noreply.github.com>
 Date: Thu, 16 Jul 2026 03:25:02 -0700
-Subject: [PATCH 02/12] turbopack-trace-utils: gate signal-listening exit APIs
+Subject: [PATCH 02/16] turbopack-trace-utils: gate signal-listening exit APIs
  off on wasm
 
 There are no process signals on WASI. ExitGuard::new and ExitHandler::listen
@@ -13,7 +13,7 @@ library consumers (next-swc) use ExitHandler::new_receiver.
  1 file changed, 5 insertions(+)
 
 diff --git a/turbopack/crates/turbopack-trace-utils/src/exit.rs b/turbopack/crates/turbopack-trace-utils/src/exit.rs
-index 140224da..e5a464a5 100644
+index 140224da1dc4375a3ea6b38bf6f02d1db0d78973..e5a464a50bec739aeda32433c28c8f7987e7b541 100644
 --- a/turbopack/crates/turbopack-trace-utils/src/exit.rs
 +++ b/turbopack/crates/turbopack-trace-utils/src/exit.rs
 @@ -19,6 +19,9 @@ impl<T> Drop for ExitGuard<T> {

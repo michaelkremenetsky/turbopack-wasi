@@ -1,8 +1,8 @@
-From f1c22f75146261d30356149f30afd1cd1906c0e0 Mon Sep 17 00:00:00 2001
+From e1188aa234981278e86d32331c83481be3235ad4 Mon Sep 17 00:00:00 2001
 From: michaelkremenetsky
  <28833521+michaelkremenetsky@users.noreply.github.com>
 Date: Thu, 16 Jul 2026 03:37:10 -0700
-Subject: [PATCH 08/12] next-napi-bindings: enable turbopack and next-api on
+Subject: [PATCH 08/16] next-napi-bindings: enable turbopack and next-api on
  wasm32-wasip1-threads
 
 Compile the full turbopack/next-api stack for the wasi napi build:
@@ -22,7 +22,7 @@ Compile the full turbopack/next-api stack for the wasi napi build:
  4 files changed, 29 insertions(+), 10 deletions(-)
 
 diff --git a/crates/napi/Cargo.toml b/crates/napi/Cargo.toml
-index a0a3ddec..4f14aa0c 100644
+index a0a3ddec1f0397d8930b49ed9cb22c2963bda0f9..4f14aa0c065e3d19745bf53d8d0fc278c263b3ab 100644
 --- a/crates/napi/Cargo.toml
 +++ b/crates/napi/Cargo.toml
 @@ -132,10 +132,23 @@ windows-sys = "0.60"
@@ -51,7 +51,7 @@ index a0a3ddec..4f14aa0c 100644
  [target.wasm32-wasip1-threads.dependencies]
  # this requires tokio_unstable currently.
 diff --git a/crates/napi/src/lib.rs b/crates/napi/src/lib.rs
-index 24dacb72..4ee4b604 100644
+index 24dacb72b44da2f1ca646d2faef5770f3a69a545..4ee4b604b61d3cecb288785525c91c841af2c103 100644
 --- a/crates/napi/src/lib.rs
 +++ b/crates/napi/src/lib.rs
 @@ -50,7 +50,6 @@ pub mod css;
@@ -71,7 +71,7 @@ index 24dacb72..4ee4b604 100644
  pub mod util;
  
 diff --git a/crates/napi/src/next_api/project.rs b/crates/napi/src/next_api/project.rs
-index 683be3a0..a60963b5 100644
+index 683be3a07b1378ddbf860a0a037b9f6c3f889f4e..a60963b5ee2c9022b56af54901e915db5253c812 100644
 --- a/crates/napi/src/next_api/project.rs
 +++ b/crates/napi/src/next_api/project.rs
 @@ -1,4 +1,6 @@
@@ -106,7 +106,7 @@ index 683be3a0..a60963b5 100644
  
          subscriber.init();
 diff --git a/turbopack/crates/turbopack-trace-utils/src/exit.rs b/turbopack/crates/turbopack-trace-utils/src/exit.rs
-index e5a464a5..848054f4 100644
+index e5a464a50bec739aeda32433c28c8f7987e7b541..848054f4ae1c0ed807fb03a6b87c4b158fca5c07 100644
 --- a/turbopack/crates/turbopack-trace-utils/src/exit.rs
 +++ b/turbopack/crates/turbopack-trace-utils/src/exit.rs
 @@ -4,6 +4,7 @@ use std::{

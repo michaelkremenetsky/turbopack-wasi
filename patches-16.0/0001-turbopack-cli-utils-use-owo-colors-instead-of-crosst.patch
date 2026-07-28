@@ -1,8 +1,8 @@
-From 524e1aba337a698047706cdf8a06592851f794e4 Mon Sep 17 00:00:00 2001
+From a1d4d7d71c949ee063720c2763e792237174b378 Mon Sep 17 00:00:00 2001
 From: michaelkremenetsky
  <28833521+michaelkremenetsky@users.noreply.github.com>
 Date: Thu, 16 Jul 2026 03:25:02 -0700
-Subject: [PATCH 01/12] turbopack-cli-utils: use owo-colors instead of
+Subject: [PATCH 01/16] turbopack-cli-utils: use owo-colors instead of
  crossterm for issue styling
 
 crossterm does not build on wasm32-wasip1-threads (terminal/event machinery);
@@ -14,7 +14,7 @@ dependency of this crate) covers on every platform.
  2 files changed, 4 insertions(+), 8 deletions(-)
 
 diff --git a/turbopack/crates/turbopack-cli-utils/Cargo.toml b/turbopack/crates/turbopack-cli-utils/Cargo.toml
-index 2cae9739..34c5d106 100644
+index 2cae973901eff3dcc9e1b491b5079aab4a680bae..34c5d106aec819facaa23cf8bd2e58203ee7f80f 100644
 --- a/turbopack/crates/turbopack-cli-utils/Cargo.toml
 +++ b/turbopack/crates/turbopack-cli-utils/Cargo.toml
 @@ -16,7 +16,6 @@ workspace = true
@@ -26,7 +26,7 @@ index 2cae9739..34c5d106 100644
  rustc-hash = { workspace = true }
  serde = { workspace = true, features = ["derive"] }
 diff --git a/turbopack/crates/turbopack-cli-utils/src/issue.rs b/turbopack/crates/turbopack-cli-utils/src/issue.rs
-index 52bcda13..b3b68bc5 100644
+index 52bcda13b2c27d1a2eeafad538bb55c339b60abe..b3b68bc57ac0ae416b9c06d139ad0f2203baba2b 100644
 --- a/turbopack/crates/turbopack-cli-utils/src/issue.rs
 +++ b/turbopack/crates/turbopack-cli-utils/src/issue.rs
 @@ -8,7 +8,6 @@ use std::{

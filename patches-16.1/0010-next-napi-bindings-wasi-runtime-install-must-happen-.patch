@@ -1,8 +1,8 @@
-From efc457bb8b121bcb9fa256edbf0ef21ddfe5b4a6 Mon Sep 17 00:00:00 2001
+From 52879d0ea0d2c4e9de740430096e4ba121ffb3d4 Mon Sep 17 00:00:00 2001
 From: michaelkremenetsky
  <28833521+michaelkremenetsky@users.noreply.github.com>
 Date: Thu, 16 Jul 2026 07:14:29 -0700
-Subject: [PATCH 10/12] next-napi-bindings: wasi runtime install must happen
+Subject: [PATCH 10/16] next-napi-bindings: wasi runtime install must happen
  before any napi call
 
 napi wraps every exported function in within_runtime_if_available, which
@@ -26,7 +26,7 @@ bundle + client chunks + HMR client, ~3.3s for the first page).
  1 file changed, 111 insertions(+), 11 deletions(-)
 
 diff --git a/crates/napi/src/lib.rs b/crates/napi/src/lib.rs
-index ef8e2a03..7f41be26 100644
+index ef8e2a03e5ca091d98ad8345597dc0423cc1a0a9..7f41be2661fc0c3ca16891b690ab5e67d585cba4 100644
 --- a/crates/napi/src/lib.rs
 +++ b/crates/napi/src/lib.rs
 @@ -65,31 +65,131 @@ static ALLOC: turbo_tasks_malloc::TurboMalloc = turbo_tasks_malloc::TurboMalloc;

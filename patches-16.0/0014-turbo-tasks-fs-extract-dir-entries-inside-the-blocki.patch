@@ -1,8 +1,8 @@
-From 8aa2b4bd1d861e3f17cf3efd585c7688796bdee1 Mon Sep 17 00:00:00 2001
+From 6a191d946ed04e29f39ae14f0c2208025678e366 Mon Sep 17 00:00:00 2001
 From: michaelkremenetsky
  <28833521+michaelkremenetsky@users.noreply.github.com>
 Date: Thu, 16 Jul 2026 17:53:38 -0700
-Subject: [PATCH] turbo-tasks-fs: extract dir entries inside the blocking
+Subject: [PATCH 14/16] turbo-tasks-fs: extract dir entries inside the blocking
  closure (wasi per-thread fd tables)
 
 retry_blocking spawns onto the blocking pool on these tags; the ReadDir
@@ -16,10 +16,10 @@ crosses threads. 16.2 avoids this by running retry_blocking inline
  1 file changed, 21 insertions(+), 14 deletions(-)
 
 diff --git a/turbopack/crates/turbo-tasks-fs/src/lib.rs b/turbopack/crates/turbo-tasks-fs/src/lib.rs
-index 9d14d2ab..2ac1307e 100644
+index 305ab683f48616e24bdbcd614e1def200319d725..89509d11ba2e1f755251a76c82a36ea095ad9a73 100644
 --- a/turbopack/crates/turbo-tasks-fs/src/lib.rs
 +++ b/turbopack/crates/turbo-tasks-fs/src/lib.rs
-@@ -714,10 +714,19 @@ impl FileSystem for DiskFileSystem {
+@@ -690,10 +690,19 @@ impl FileSystem for DiskFileSystem {
  
          // we use the sync std function here as it's a lot faster (600%) in
          // node-file-trace
@@ -38,9 +38,9 @@ index 9d14d2ab..2ac1307e 100644
 +                .map(|r| r.and_then(|e| Ok((e.file_name(), e.file_type()?))))
 +                .collect::<std::io::Result<Vec<_>>>()
          })
-         .concurrency_limited(&self.inner.read_semaphore)
+         .concurrency_limited(&self.inner.semaphore)
          .await
-@@ -762,14 +771,10 @@ impl FileSystem for DiskFileSystem {
+@@ -738,14 +747,10 @@ impl FileSystem for DiskFileSystem {
          };
  
          let entries = read_dir
@@ -58,7 +58,7 @@ index 9d14d2ab..2ac1307e 100644
                  // Filter out denied entries
                  if let Some(denied_name) = denied_entry
                      && denied_name == file_name.as_str()
-@@ -777,12 +782,14 @@ impl FileSystem for DiskFileSystem {
+@@ -753,12 +758,14 @@ impl FileSystem for DiskFileSystem {
                      return None;
                  }
  

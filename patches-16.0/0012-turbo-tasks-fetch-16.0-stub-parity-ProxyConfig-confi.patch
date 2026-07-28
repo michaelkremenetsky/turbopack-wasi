@@ -1,8 +1,8 @@
-From da95e0271188e35e66984ac5c9ddc809640fc096 Mon Sep 17 00:00:00 2001
+From 5cdac04427fd906f2d527a306e78aff029d917ca Mon Sep 17 00:00:00 2001
 From: michaelkremenetsky
  <28833521+michaelkremenetsky@users.noreply.github.com>
 Date: Thu, 16 Jul 2026 08:50:40 -0700
-Subject: [PATCH 12/12] turbo-tasks-fetch: 16.0 stub parity (ProxyConfig,
+Subject: [PATCH 12/16] turbo-tasks-fetch: 16.0 stub parity (ProxyConfig,
  config fields, rustls gate)
 
 ---
@@ -11,7 +11,7 @@ Subject: [PATCH 12/12] turbo-tasks-fetch: 16.0 stub parity (ProxyConfig,
  2 files changed, 23 insertions(+), 3 deletions(-)
 
 diff --git a/turbopack/crates/turbo-tasks-fetch/src/client_wasm.rs b/turbopack/crates/turbo-tasks-fetch/src/client_wasm.rs
-index 523117b9..c8f57af5 100644
+index 523117b9938459885cae05b05399bb047b2e9e99..c8f57af53673e49659b4ba19a4cd9475c509c518 100644
 --- a/turbopack/crates/turbo-tasks-fetch/src/client_wasm.rs
 +++ b/turbopack/crates/turbo-tasks-fetch/src/client_wasm.rs
 @@ -1,15 +1,34 @@
@@ -53,7 +53,7 @@ index 523117b9..c8f57af5 100644
  #[turbo_tasks::value_impl]
  impl FetchClientConfig {
 diff --git a/turbopack/crates/turbo-tasks-fetch/src/error.rs b/turbopack/crates/turbo-tasks-fetch/src/error.rs
-index 281306a7..9ad5e2f9 100644
+index 281306a78a6ee18d899399fb466bb75cad14f6c9..9ad5e2f92783d09f83bff9610e2beee3bb675142 100644
 --- a/turbopack/crates/turbo-tasks-fetch/src/error.rs
 +++ b/turbopack/crates/turbo-tasks-fetch/src/error.rs
 @@ -28,6 +28,7 @@ pub struct FetchError {

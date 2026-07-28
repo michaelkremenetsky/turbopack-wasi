@@ -1,8 +1,8 @@
-From 0676974ebed1c941569d331b928a39b0ac6f83ba Mon Sep 17 00:00:00 2001
+From 0eb1b074732cd85ba5018e6191d8f363d41dc4a4 Mon Sep 17 00:00:00 2001
 From: michaelkremenetsky
  <28833521+michaelkremenetsky@users.noreply.github.com>
 Date: Thu, 16 Jul 2026 08:47:38 -0700
-Subject: [PATCH 11/12] turbo-tasks-fetch: drop reqwest from the wasm dep tree
+Subject: [PATCH 11/16] turbo-tasks-fetch: drop reqwest from the wasm dep tree
 
 The fetch client is stubbed on wasm; the unconditional reqwest dependency
 still pulled its (non-compiling) wasm client in. Non-wasm targets are all
@@ -13,7 +13,7 @@ covered by the existing per-target sections.
  2 files changed, 16 insertions(+), 24 deletions(-)
 
 diff --git a/Cargo.lock b/Cargo.lock
-index cca56b62..c24b0efd 100644
+index cca56b629f96434fec5b384571c05e92881ad005..c24b0efd2370a1b55a2776832fecb823d8fca00e 100644
 --- a/Cargo.lock
 +++ b/Cargo.lock
 @@ -1625,22 +1625,6 @@ dependencies = [
@@ -110,7 +110,7 @@ index cca56b62..c24b0efd 100644
   "rustc-hash 2.1.1",
   "serde",
 diff --git a/turbopack/crates/turbo-tasks-fetch/Cargo.toml b/turbopack/crates/turbo-tasks-fetch/Cargo.toml
-index 80f947b1..28d54148 100644
+index 80f947b169189b486944bac1cd4f8c14de19cc02..28d541484d9afab4d3040c3541da8b3e558fdd8c 100644
 --- a/turbopack/crates/turbo-tasks-fetch/Cargo.toml
 +++ b/turbopack/crates/turbo-tasks-fetch/Cargo.toml
 @@ -30,7 +30,6 @@ rustls = { version = "0.23.0", default-features = false }

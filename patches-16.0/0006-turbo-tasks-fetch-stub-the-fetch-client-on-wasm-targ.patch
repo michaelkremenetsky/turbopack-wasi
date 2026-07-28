@@ -1,8 +1,8 @@
-From 5fdca06fc48a68e4e717e4487d36d1dc81ff4ff2 Mon Sep 17 00:00:00 2001
+From cbe02431843f7703c49ee85ac9ce86eeb2055f11 Mon Sep 17 00:00:00 2001
 From: michaelkremenetsky
  <28833521+michaelkremenetsky@users.noreply.github.com>
 Date: Thu, 16 Jul 2026 03:31:29 -0700
-Subject: [PATCH 06/12] turbo-tasks-fetch: stub the fetch client on wasm
+Subject: [PATCH 06/16] turbo-tasks-fetch: stub the fetch client on wasm
  targets
 
 reqwest does not build on wasm32-wasip1-threads. Keep the crate API
@@ -18,7 +18,7 @@ host-backed fetch implementation can replace the stub later.
 
 diff --git a/turbopack/crates/turbo-tasks-fetch/src/client_wasm.rs b/turbopack/crates/turbo-tasks-fetch/src/client_wasm.rs
 new file mode 100644
-index 00000000..523117b9
+index 0000000000000000000000000000000000000000..523117b9938459885cae05b05399bb047b2e9e99
 --- /dev/null
 +++ b/turbopack/crates/turbo-tasks-fetch/src/client_wasm.rs
 @@ -0,0 +1,39 @@
@@ -62,7 +62,7 @@ index 00000000..523117b9
 +    0
 +}
 diff --git a/turbopack/crates/turbo-tasks-fetch/src/error.rs b/turbopack/crates/turbo-tasks-fetch/src/error.rs
-index eee81e1a..281306a7 100644
+index eee81e1a352e6ea9adf49e37eb8942dd99ee18e2..281306a78a6ee18d899399fb466bb75cad14f6c9 100644
 --- a/turbopack/crates/turbo-tasks-fetch/src/error.rs
 +++ b/turbopack/crates/turbo-tasks-fetch/src/error.rs
 @@ -58,6 +58,7 @@ fn has_rustls_cause(err: &reqwest::Error) -> bool {
@@ -74,7 +74,7 @@ index eee81e1a..281306a7 100644
          error: &reqwest::Error,
          url: &str,
 diff --git a/turbopack/crates/turbo-tasks-fetch/src/lib.rs b/turbopack/crates/turbo-tasks-fetch/src/lib.rs
-index 2a9444b3..d1601048 100644
+index 2a9444b3f0b5b37245f558949e844de7f3ee3816..d1601048947c2901279acca0f76dbbab5a22eb36 100644
 --- a/turbopack/crates/turbo-tasks-fetch/src/lib.rs
 +++ b/turbopack/crates/turbo-tasks-fetch/src/lib.rs
 @@ -2,6 +2,11 @@

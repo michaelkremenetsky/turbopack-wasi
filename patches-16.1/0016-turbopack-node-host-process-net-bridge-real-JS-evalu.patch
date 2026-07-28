@@ -2,9 +2,9 @@ From bab6521e6573d20665323672dda625afb632e236 Mon Sep 17 00:00:00 2001
 From: michaelkremenetsky
  <28833521+michaelkremenetsky@users.noreply.github.com>
 Date: Tue, 28 Jul 2026 10:24:17 -0700
-Subject: [PATCH] =?UTF-8?q?turbopack-node:=20host=20process/net=20bridge?=
- =?UTF-8?q?=20=E2=80=94=20real=20JS=20evaluation=20on=20capable=20wasi=20h?=
- =?UTF-8?q?osts?=
+Subject: [PATCH 16/16] =?UTF-8?q?turbopack-node:=20host=20process/net=20br?=
+ =?UTF-8?q?idge=20=E2=80=94=20real=20JS=20evaluation=20on=20capable=20wasi?=
+ =?UTF-8?q?=20hosts?=
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
@@ -25,7 +25,6 @@ Unsupported behavior. Native builds untouched (wasm-only module + deps).
  Cargo.lock                                    |   4 +-
  turbopack/crates/turbopack-node/Cargo.toml    |   7 +
  .../crates/turbopack-node/src/host_pool.rs    | 680 ++++++++++++++++++
- turbopack/crates/turbopack-node/src/lib.rs    |   6 +
  turbopack/crates/turbopack-node/src/pool.rs   |  10 +-
  .../crates/turbopack-node/src/wasi_stubs.rs   | 199 -----
  6 files changed, 703 insertions(+), 203 deletions(-)
@@ -33,7 +32,7 @@ Unsupported behavior. Native builds untouched (wasm-only module + deps).
  delete mode 100644 turbopack/crates/turbopack-node/src/wasi_stubs.rs
 
 diff --git a/Cargo.lock b/Cargo.lock
-index 463a3db7..85e2fbee 100644
+index 463a3db7696d2453839350194dce4e5134b83a55..85e2fbeeb5988df7b39edc0f2fdda1053861231e 100644
 --- a/Cargo.lock
 +++ b/Cargo.lock
 @@ -4155,8 +4155,6 @@ dependencies = [
@@ -55,7 +54,7 @@ index 463a3db7..85e2fbee 100644
   "owo-colors",
   "parking_lot",
 diff --git a/turbopack/crates/turbopack-node/Cargo.toml b/turbopack/crates/turbopack-node/Cargo.toml
-index ad8ec886..a5cc47d8 100644
+index ad8ec886484cb03949303f7e29cafcea76f85ce1..a5cc47d8013c47c7b2004c76bf76d070cbbf8aac 100644
 --- a/turbopack/crates/turbopack-node/Cargo.toml
 +++ b/turbopack/crates/turbopack-node/Cargo.toml
 @@ -48,3 +48,10 @@ turbopack-core = { workspace = true }
@@ -71,7 +70,7 @@ index ad8ec886..a5cc47d8 100644
 +
 diff --git a/turbopack/crates/turbopack-node/src/host_pool.rs b/turbopack/crates/turbopack-node/src/host_pool.rs
 new file mode 100644
-index 00000000..c7c5cc1d
+index 0000000000000000000000000000000000000000..c7c5cc1de4ce96422386e4beb871abf7f3c4627b
 --- /dev/null
 +++ b/turbopack/crates/turbopack-node/src/host_pool.rs
 @@ -0,0 +1,680 @@
@@ -755,25 +754,8 @@ index 00000000..c7c5cc1d
 +        send_action("dropConn", self.conn_id);
 +    }
 +}
-diff --git a/turbopack/crates/turbopack-node/src/lib.rs b/turbopack/crates/turbopack-node/src/lib.rs
-index c9c043ee..4774cc49 100644
---- a/turbopack/crates/turbopack-node/src/lib.rs
-+++ b/turbopack/crates/turbopack-node/src/lib.rs
-@@ -19,6 +19,12 @@ pub mod evaluate;
- pub mod execution_context;
- mod heap_queue;
- mod pool;
-+// Host-bridged stand-ins for tokio's process/net APIs (which don't exist on
-+// wasi): the napi host registers child_process/net callbacks through the
-+// binding, and the child-process pool runs unchanged over them. No bridge
-+// registered -> spawning fails at runtime with Unsupported.
-+#[cfg(target_family = "wasm")]
-+pub mod host_pool;
- pub mod source_map;
- pub mod transforms;
- 
 diff --git a/turbopack/crates/turbopack-node/src/pool.rs b/turbopack/crates/turbopack-node/src/pool.rs
-index 3618ba73..a0eb2213 100644
+index 3618ba734a97aa7285773a317cbac77a6ca6229f..a0eb2213cb48e4619c6191f2d619e8b7e87f8295 100644
 --- a/turbopack/crates/turbopack-node/src/pool.rs
 +++ b/turbopack/crates/turbopack-node/src/pool.rs
 @@ -4,10 +4,14 @@ use std::{
@@ -805,7 +787,7 @@ index 3618ba73..a0eb2213 100644
  use turbo_tasks_fs::{FileSystemPath, json::parse_json_with_source_context};
 diff --git a/turbopack/crates/turbopack-node/src/wasi_stubs.rs b/turbopack/crates/turbopack-node/src/wasi_stubs.rs
 deleted file mode 100644
-index 8e48c98d..00000000
+index 8e48c98d4d9accd2a5e8f0512342a4348bef9196..0000000000000000000000000000000000000000
 --- a/turbopack/crates/turbopack-node/src/wasi_stubs.rs
 +++ /dev/null
 @@ -1,199 +0,0 @@

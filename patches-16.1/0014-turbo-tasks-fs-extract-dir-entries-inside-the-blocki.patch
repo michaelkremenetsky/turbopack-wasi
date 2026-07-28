@@ -1,8 +1,8 @@
-From 8aa2b4bd1d861e3f17cf3efd585c7688796bdee1 Mon Sep 17 00:00:00 2001
+From f7569d2a0d5c9675258a372cdf50ac9bde390859 Mon Sep 17 00:00:00 2001
 From: michaelkremenetsky
  <28833521+michaelkremenetsky@users.noreply.github.com>
 Date: Thu, 16 Jul 2026 17:53:38 -0700
-Subject: [PATCH] turbo-tasks-fs: extract dir entries inside the blocking
+Subject: [PATCH 14/16] turbo-tasks-fs: extract dir entries inside the blocking
  closure (wasi per-thread fd tables)
 
 retry_blocking spawns onto the blocking pool on these tags; the ReadDir
@@ -16,7 +16,7 @@ crosses threads. 16.2 avoids this by running retry_blocking inline
  1 file changed, 21 insertions(+), 14 deletions(-)
 
 diff --git a/turbopack/crates/turbo-tasks-fs/src/lib.rs b/turbopack/crates/turbo-tasks-fs/src/lib.rs
-index 9d14d2ab..2ac1307e 100644
+index 9d14d2ab9651007de8944f8f926635e2d3242417..2ac1307e2af5fe55b2779d8f89fad718dbc05131 100644
 --- a/turbopack/crates/turbo-tasks-fs/src/lib.rs
 +++ b/turbopack/crates/turbo-tasks-fs/src/lib.rs
 @@ -714,10 +714,19 @@ impl FileSystem for DiskFileSystem {

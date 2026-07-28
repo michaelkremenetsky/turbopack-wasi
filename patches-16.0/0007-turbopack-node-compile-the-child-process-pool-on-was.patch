@@ -1,8 +1,8 @@
-From 785ca433a957928f4867764dc01cdf812d405e43 Mon Sep 17 00:00:00 2001
+From 311d225bccf55dacf9f418191985eb71f09d0183 Mon Sep 17 00:00:00 2001
 From: michaelkremenetsky
  <28833521+michaelkremenetsky@users.noreply.github.com>
 Date: Thu, 16 Jul 2026 08:44:01 -0700
-Subject: [PATCH 07/12] turbopack-node: compile the child-process pool on wasm
+Subject: [PATCH 07/16] turbopack-node: compile the child-process pool on wasm
  via type-compatible stubs
 
 wasi has no subprocesses or TCP sockets and tokio does not compile its
@@ -14,11 +14,11 @@ still works.
 ---
  turbopack/crates/turbopack-node/src/pool.rs   |   9 +-
  .../crates/turbopack-node/src/wasi_stubs.rs   | 199 ++++++++++++++++++
- 2 files changed, 210 insertions(+), 2 deletions(-)
+ 2 files changed, 206 insertions(+), 2 deletions(-)
  create mode 100644 turbopack/crates/turbopack-node/src/wasi_stubs.rs
 
 diff --git a/turbopack/crates/turbopack-node/src/pool.rs b/turbopack/crates/turbopack-node/src/pool.rs
-index 56217310..26d1535e 100644
+index 562173100f170915d4522dac39cc34f4bf6eae8a..26d1535e665d364a8fd6feef26c05fc6266f38da 100644
 --- a/turbopack/crates/turbopack-node/src/pool.rs
 +++ b/turbopack/crates/turbopack-node/src/pool.rs
 @@ -22,12 +22,17 @@ use tokio::{
@@ -43,7 +43,7 @@ index 56217310..26d1535e 100644
  use turbo_tasks_fs::{FileSystemPath, json::parse_json_with_source_context};
 diff --git a/turbopack/crates/turbopack-node/src/wasi_stubs.rs b/turbopack/crates/turbopack-node/src/wasi_stubs.rs
 new file mode 100644
-index 00000000..8e48c98d
+index 0000000000000000000000000000000000000000..8e48c98d4d9accd2a5e8f0512342a4348bef9196
 --- /dev/null
 +++ b/turbopack/crates/turbopack-node/src/wasi_stubs.rs
 @@ -0,0 +1,199 @@
