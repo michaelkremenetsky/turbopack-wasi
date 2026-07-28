@@ -241,6 +241,130 @@ if (IN_POOL_WORKER) {
         });
       }
 
+      // Host process bridge: pre-16.2 turbopack evaluates JS (postcss,
+      // webpack loaders) through a pool of `node <entrypoint>` children wired
+      // up over loopback TCP — which plain wasi lacks but this host has
+      // (plain Node's child_process/net, or a node-compatible wasi runtime's
+      // guest syscalls). The binding delegates spawn/listen/stream traffic to
+      // these callbacks; pool children are stock node processes running
+      // turbopack's own ipc entrypoint and never load the binding. 16.2+
+      // builds use the worker_threads pool instead and don't export this.
+      if (typeof raw.initTurbopackProcessBridge === 'function') {
+        const cp = require('node:child_process');
+        const net = require('node:net');
+        const procs = new Map(); // procId -> ChildProcess
+        const conns = new Map(); // connId -> net.Socket
+        const servers = new Map(); // listenerId -> net.Server
+        // Rust allocates ids counting up from 1; host-side conn ids count
+        // down from the top of the u32 range so they can never collide.
+        let nextConnId = 0xffffffff;
+        const push = (id, data) => {
+          try {
+            raw.turbopackPoolPushBytes(id, data);
+          } catch (err) {
+            dbg('pool push failed:', err && err.message || err);
+          }
+        };
+        raw.initTurbopackProcessBridge(
+          (convErr, req) => {
+            if (convErr) return;
+            dbg('pool spawn', req.program, req.args[req.args.length - 1]);
+            let exited = false;
+            const exit = (code) => {
+              if (exited) return;
+              exited = true;
+              push(req.stdoutId, null);
+              push(req.stderrId, null);
+              procs.delete(req.procId);
+              try {
+                raw.turbopackPoolProcExit(req.procId, code);
+              } catch (err) {
+                dbg('pool exit report failed:', err && err.message || err);
+              }
+            };
+            let child;
+            try {
+              child = cp.spawn(req.program, req.args, {
+                cwd: req.cwd || undefined,
+                env: req.env,
+                stdio: ['ignore', 'pipe', 'pipe'],
+              });
+            } catch (err) {
+              push(req.stderrId, Buffer.from('spawn failed: ' + (err && err.message || err) + '\n'));
+              return exit(127);
+            }
+            procs.set(req.procId, child);
+            child.stdout.on('data', (b) => push(req.stdoutId, b));
+            child.stderr.on('data', (b) => push(req.stderrId, b));
+            child.on('error', (err) => {
+              // ENOENT etc.; 'close' follows with code null and reports exit.
+              push(req.stderrId, Buffer.from('spawn failed: ' + (err && err.message || err) + '\n'));
+            });
+            // 'close' (not 'exit') so stdio is fully drained before EOF+exit.
+            child.on('close', (code, signal) => exit(code == null ? (signal ? 137 : 127) : code));
+          },
+          (convErr, streamId, data) => {
+            if (convErr) return;
+            const sock = conns.get(streamId);
+            if (sock && !sock.destroyed) sock.write(Buffer.from(data));
+          },
+          (convErr, op, id) => {
+            if (convErr) return;
+            if (op === 'kill') {
+              const child = procs.get(id);
+              if (child) {
+                try { child.kill('SIGKILL'); } catch { /* already gone */ }
+              }
+            } else if (op === 'closeWrite') {
+              const sock = conns.get(id);
+              if (sock) {
+                try { sock.end(); } catch { /* already gone */ }
+              }
+            } else if (op === 'dropConn') {
+              const sock = conns.get(id);
+              conns.delete(id);
+              if (sock) {
+                try { sock.destroy(); } catch { /* already gone */ }
+              }
+            } else if (op === 'closeListener') {
+              const server = servers.get(id);
+              servers.delete(id);
+              if (server) {
+                try { server.close(); } catch { /* already gone */ }
+              }
+            }
+          },
+          (convErr, listenerId) => {
+            if (convErr) return Promise.reject(convErr);
+            return new Promise((resolve, reject) => {
+              const server = net.createServer((sock) => {
+                const connId = nextConnId--;
+                conns.set(connId, sock);
+                sock.on('error', () => { /* surfaced as EOF via close */ });
+                // Register the Rust-side channel before any data can flow.
+                try {
+                  raw.turbopackPoolAccept(listenerId, connId);
+                } catch (err) {
+                  dbg('pool accept report failed:', err && err.message || err);
+                  sock.destroy();
+                  conns.delete(connId);
+                  return;
+                }
+                sock.on('data', (b) => push(connId, b));
+                sock.on('close', () => {
+                  push(connId, null);
+                  conns.delete(connId);
+                });
+              });
+              server.on('error', reject);
+              servers.set(listenerId, server);
+              server.listen(0, '127.0.0.1', () => resolve(server.address().port));
+            });
+          }
+        );
+        dbg('host process bridge registered');
+      }
+
       // Graft the bindings onto THIS module's exports (the CJS cache means
       // next's loadNative() require of binding.cjs sees the same object).
       Object.assign(module.exports, raw);

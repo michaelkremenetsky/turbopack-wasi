@@ -5,10 +5,20 @@
 There are three series, picked by tag in `scripts/build.sh`: `patches/` for
 16.2+, `patches-16.0/` for 16.0.0-16.1.0, `patches-16.1/` for 16.1.1-16.1.7.
 The older tags predate the `worker_pool` backend and the `crates/napi` ->
-`crates/next-napi-bindings` rename, so they get rebased variants plus an
-extra turbopack-node commit that stubs the child-process pool with
-type-compatible wasi stand-ins (spawn/bind fail at runtime with
-`Unsupported`).
+`crates/next-napi-bindings` rename, so they get rebased variants plus a
+turbopack-node commit that makes the child-process pool host-bridged: the
+binding exposes `initTurbopackProcessBridge(spawn, write, action, listen)`
+and the pool's `Command`/`Child`/`TcpListener`/`TcpStream` delegate to the
+registered host callbacks (`src/host_pool.rs`). Plain wasi has neither
+subprocesses nor TCP, but the napi host usually has both — plain Node's
+child_process/net, or a node-compatible wasi runtime's guest syscalls — so
+the pool runs its stock length-prefixed protocol over bridged streams and
+pool children are ordinary `node <entrypoint>` processes that never load
+the binding. Same move as the host fetch bridge (patch 15 of the 16.2
+series); with no bridge registered, spawning fails with `Unsupported` like
+the old stubs did. `loader.cjs` registers the bridge whenever the binding
+exports it, so pre-16.2 postcss/tailwind/webpack-loader evaluation works
+wherever the loader runs.
 
 The 16.2 series, in order:
 
@@ -97,11 +107,13 @@ you don't have to care, but if you touch the scripts, know this:
 - `next dev` end-to-end inside a browser runtime works, Turbopack compile
   and all. The browser side lives in the embedding host, not here; this repo
   just has to keep the artifact and loader honest.
-- 16.0.x and 16.1.x work end-to-end with their rebased series (verified on
-  16.0.11 and 16.1.2). Those versions predate `worker_pool` entirely though,
-  so any JS evaluation (postcss, tailwind, webpack loaders) fails with a
-  clear `Unsupported` pointing at next >= 16.2. Nothing to be done there.
-  The child-process pool those versions want cannot exist on wasi.
+- 16.0.x and 16.1.x work end-to-end with their rebased series. Those
+  versions predate `worker_pool` entirely, so JS evaluation used to fail
+  with `Unsupported` — the child-process pool they want can't exist on
+  plain wasi. It CAN exist on the hosts we actually run on, though, so the
+  pool is now host-bridged (see above): with the loader's bridge registered,
+  postcss/tailwind compiles work on 16.0.x/16.1.x too (verified on 16.1.6 +
+  tailwind 3, `fixtures/hello-1616-tw`).
 - All 31 stable v16 versions build and are published. Only 18 unique
   fingerprints among them; many tags share a byte-identical Rust tree. See
   `scripts/build-all-v16.sh`.
@@ -138,6 +150,11 @@ hand instead, four things are load-bearing:
    'workerThreads'`. (With patch 13 the stock default also works.)
 4. `process.cwd()` must be the app dir when next config loads, same as real
    `next dev`.
+5. Pre-16.2 artifacts only: register the process bridge
+   (`initTurbopackProcessBridge`) with child_process/net-backed callbacks if
+   you want JS evaluation — `loader.cjs` is the reference implementation.
+   Skipping it degrades to the old behavior (postcss/loader evaluation fails
+   with `Unsupported`).
 
 ## Publishing / versioning
 

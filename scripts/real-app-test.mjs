@@ -118,6 +118,80 @@ console.error('[app-test] wasi binding instantiated,', Object.keys(napiModule.ex
 // Install a real multi-threaded tokio runtime (wasm hosts must do this before turbopack calls).
 napiModule.exports.initTurbopackWasiRuntime(8)
 console.error('[app-test] tokio multi-thread runtime installed')
+
+// Host process bridge (pre-16.2 builds): the child-process pool delegates
+// spawn/listen/stream traffic here so JS evaluation (postcss/tailwind) works.
+// Mirrors the registration in pkg/loader.cjs.
+if (typeof napiModule.exports.initTurbopackProcessBridge === 'function') {
+  const raw = napiModule.exports
+  const cp = await import('node:child_process')
+  const net = await import('node:net')
+  const procs = new Map()
+  const conns = new Map()
+  const servers = new Map()
+  let nextConnId = 0xffffffff
+  const push = (id, data) => raw.turbopackPoolPushBytes(id, data)
+  raw.initTurbopackProcessBridge(
+    (convErr, req) => {
+      if (convErr) return
+      console.error('[app-test] pool spawn:', req.program, req.args.join(' '))
+      let exited = false
+      const exit = (code) => {
+        if (exited) return
+        exited = true
+        push(req.stdoutId, null)
+        push(req.stderrId, null)
+        procs.delete(req.procId)
+        raw.turbopackPoolProcExit(req.procId, code)
+      }
+      let child
+      try {
+        child = cp.spawn(req.program, req.args, {
+          cwd: req.cwd || undefined,
+          env: req.env,
+          stdio: ['ignore', 'pipe', 'pipe'],
+        })
+      } catch (err) {
+        push(req.stderrId, Buffer.from('spawn failed: ' + err.message + '\n'))
+        return exit(127)
+      }
+      procs.set(req.procId, child)
+      child.stdout.on('data', (b) => push(req.stdoutId, b))
+      child.stderr.on('data', (b) => push(req.stderrId, b))
+      child.on('error', (err) => push(req.stderrId, Buffer.from('spawn failed: ' + err.message + '\n')))
+      child.on('close', (code, signal) => exit(code == null ? (signal ? 137 : 127) : code))
+    },
+    (convErr, streamId, data) => {
+      if (convErr) return
+      const sock = conns.get(streamId)
+      if (sock && !sock.destroyed) sock.write(Buffer.from(data))
+    },
+    (convErr, op, id) => {
+      if (convErr) return
+      if (op === 'kill') procs.get(id)?.kill('SIGKILL')
+      else if (op === 'closeWrite') conns.get(id)?.end()
+      else if (op === 'dropConn') { conns.get(id)?.destroy(); conns.delete(id) }
+      else if (op === 'closeListener') { servers.get(id)?.close(); servers.delete(id) }
+    },
+    (convErr, listenerId) => {
+      if (convErr) return Promise.reject(convErr)
+      return new Promise((resolve, reject) => {
+        const server = net.createServer((sock) => {
+          const connId = nextConnId--
+          conns.set(connId, sock)
+          sock.on('error', () => {})
+          raw.turbopackPoolAccept(listenerId, connId)
+          sock.on('data', (b) => push(connId, b))
+          sock.on('close', () => { push(connId, null); conns.delete(connId) })
+        })
+        server.on('error', reject)
+        servers.set(listenerId, server)
+        server.listen(0, '127.0.0.1', () => resolve(server.address().port))
+      })
+    }
+  )
+  console.error('[app-test] host process bridge registered')
+}
 if (process.env.WASI_RUST_TRACE) {
   napiModule.exports.debugEnableTracing(process.env.WASI_RUST_TRACE)
   console.error('[app-test] rust tracing enabled:', process.env.WASI_RUST_TRACE)

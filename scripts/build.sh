@@ -27,7 +27,8 @@ fi
 
 # --- apply patch series ------------------------------------------------------
 # 16.0.x/16.1.x predate the worker_pool backend and the crates/napi rename;
-# they carry a rebased series with a stubbed child-process pool.
+# they carry a rebased series with a host-bridged child-process pool (the
+# loader provides child_process/net, see PATCHES.md).
 case "$TAG" in
   v16.0.*|v16.1.0) SERIES="$ROOT/patches-16.0" ;;
   v16.1.*) SERIES="$ROOT/patches-16.1" ;;
@@ -50,9 +51,13 @@ source "$ROOT/scripts/env.sh"
 # match current @emnapi/core JS, so swap it for the current emnapi (must version-match the
 # @emnapi/core used at runtime).
 if [ ! -f "$ROOT/sdk/node_modules/napi-cli-alpha/dist/cli.js" ]; then
+  # Pinned as a coherent set: @napi-rs/wasm-runtime 1.2.0 moved to the emnapi
+  # 2.x alphas (peer @emnapi/core@^2.0.0-alpha.3), which both ERESOLVEs against
+  # emnapi 1.x here and would violate the static-lib/JS same-version rule at
+  # runtime. These are the versions the published artifacts run against.
   (cd "$ROOT/sdk" && npm install --save --ignore-scripts \
     "napi-cli-alpha@npm:@napi-rs/cli@$NAPI_CLI_VERSION" \
-    emnapi@latest @emnapi/core@latest @emnapi/runtime@latest @napi-rs/wasm-runtime@latest)
+    emnapi@1.11.3 @emnapi/core@1.11.3 @emnapi/runtime@1.11.3 @napi-rs/wasm-runtime@1.1.6)
   # accept the renamed triple (alpha only knows wasm32-wasi-preview1-threads)
   sed -i.bak "s/rawTriple === 'wasm32-wasi-preview1-threads')/rawTriple === 'wasm32-wasi-preview1-threads' || rawTriple === 'wasm32-wasip1-threads')/" \
     "$ROOT/sdk/node_modules/napi-cli-alpha/dist/utils/target.js"

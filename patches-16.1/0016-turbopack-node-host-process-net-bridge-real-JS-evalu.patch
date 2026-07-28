@@ -1,0 +1,1013 @@
+From bab6521e6573d20665323672dda625afb632e236 Mon Sep 17 00:00:00 2001
+From: michaelkremenetsky
+ <28833521+michaelkremenetsky@users.noreply.github.com>
+Date: Tue, 28 Jul 2026 10:24:17 -0700
+Subject: [PATCH] =?UTF-8?q?turbopack-node:=20host=20process/net=20bridge?=
+ =?UTF-8?q?=20=E2=80=94=20real=20JS=20evaluation=20on=20capable=20wasi=20h?=
+ =?UTF-8?q?osts?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+wasi itself has no subprocesses or TCP, so the child-process pool was
+stubbed to fail with Unsupported and pre-16.2 turbopack could not run
+postcss/tailwind/webpack loaders at all. But the napi host usually CAN do
+both: plain Node has child_process/net, and node-compatible wasi runtimes
+(strapkit) provide them as guest syscalls. Same move as the host fetch
+bridge: the binding exposes initTurbopackProcessBridge(spawn, write,
+action, listen) and the pool's Command/Child/TcpListener/TcpStream become
+host-backed types (src/host_pool.rs, replacing wasi_stubs.rs). The pool's
+length-prefixed protocol runs unchanged over the bridged streams, and pool
+children are stock node processes running turbopack's own ipc entrypoint —
+they never load the binding. No bridge registered keeps the old
+Unsupported behavior. Native builds untouched (wasm-only module + deps).
+---
+ Cargo.lock                                    |   4 +-
+ turbopack/crates/turbopack-node/Cargo.toml    |   7 +
+ .../crates/turbopack-node/src/host_pool.rs    | 680 ++++++++++++++++++
+ turbopack/crates/turbopack-node/src/lib.rs    |   6 +
+ turbopack/crates/turbopack-node/src/pool.rs   |  10 +-
+ .../crates/turbopack-node/src/wasi_stubs.rs   | 199 -----
+ 6 files changed, 703 insertions(+), 203 deletions(-)
+ create mode 100644 turbopack/crates/turbopack-node/src/host_pool.rs
+ delete mode 100644 turbopack/crates/turbopack-node/src/wasi_stubs.rs
+
+diff --git a/Cargo.lock b/Cargo.lock
+index 463a3db7..85e2fbee 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -4155,8 +4155,6 @@ dependencies = [
+ [[package]]
+ name = "napi"
+ version = "2.16.13"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "214f07a80874bb96a8433b3cdfc84980d56c7b02e1a0d7ba4ba0db5cef785e2b"
+ dependencies = [
+  "anyhow",
+  "bitflags 2.9.1",
+@@ -10033,6 +10031,8 @@ dependencies = [
+  "futures",
+  "futures-retry",
+  "indoc",
++ "napi",
++ "napi-derive",
+  "once_cell",
+  "owo-colors",
+  "parking_lot",
+diff --git a/turbopack/crates/turbopack-node/Cargo.toml b/turbopack/crates/turbopack-node/Cargo.toml
+index ad8ec886..a5cc47d8 100644
+--- a/turbopack/crates/turbopack-node/Cargo.toml
++++ b/turbopack/crates/turbopack-node/Cargo.toml
+@@ -48,3 +48,10 @@ turbopack-core = { workspace = true }
+ turbopack-ecmascript = { workspace = true }
+ turbopack-resolve = { workspace = true }
+ 
++# The host process bridge (src/host_pool.rs) registers napi callbacks so a
++# capable host can provide the child processes + loopback TCP the pool needs
++# (wasi itself has neither). Mirrors how 16.2's worker_pool takes napi deps.
++[target.'cfg(target_family = "wasm")'.dependencies]
++napi = { workspace = true }
++napi-derive = "2"
++
+diff --git a/turbopack/crates/turbopack-node/src/host_pool.rs b/turbopack/crates/turbopack-node/src/host_pool.rs
+new file mode 100644
+index 00000000..c7c5cc1d
+--- /dev/null
++++ b/turbopack/crates/turbopack-node/src/host_pool.rs
+@@ -0,0 +1,680 @@
++//! Host-bridged process + TCP plumbing for the child-process pool on wasi.
++//!
++//! Plain wasi has no subprocesses and no TCP sockets, so pre-16.2 turbopack
++//! (which predates the worker_threads pool) could not evaluate JS there at
++//! all. But the napi HOST usually can: plain Node has child_process/net, and
++//! node-compatible wasi hosts (strapkit) provide both as guest syscalls. So
++//! instead of stubbing the pool out, delegate exactly the pieces the pool
++//! needs — spawn a `node <entrypoint>` child, a loopback listener, byte
++//! streams — to host callbacks registered through the binding
++//! (`initTurbopackProcessBridge`, see next-swc-wasi's loader.cjs). The pool's
++//! own protocol (length-prefixed packets over the accepted connection,
++//! stdout/stderr framing) runs unchanged over the bridged streams, and the
++//! pool child is a plain node process running the stock ipc entrypoint — it
++//! never needs the binding.
++//!
++//! Same shape as the host fetch bridge in turbo-tasks-fetch: no bridge
++//! registered keeps the old behavior (spawn fails with `Unsupported`).
++//!
++//! Wire model: Rust allocates ids for processes/listeners/child streams from
++//! one counter; the host allocates ids for accepted connections from the top
++//! half of the u32 space. Bytes flow host->Rust through the exported
++//! `turbopackPoolPushBytes` (data) / `turbopackPoolProcExit` /
++//! `turbopackPoolAccept` entry points, and Rust->host through the registered
++//! `write`/`action`/`spawn`/`listen` callbacks. All host calls run on the JS
++//! main thread, so per-stream ordering is the JS event ordering, which is the
++//! same guarantee a real socket gives.
++#![allow(dead_code)]
++
++use std::{
++    ffi::OsStr,
++    fmt,
++    io,
++    net::SocketAddr,
++    path::Path,
++    pin::Pin,
++    process::Stdio,
++    sync::{
++        Arc,
++        atomic::{AtomicU32, Ordering},
++    },
++    task::{Context, Poll},
++};
++
++use napi::{
++    Env, JsFunction,
++    bindgen_prelude::{Buffer, Promise},
++    threadsafe_function::{ThreadSafeCallContext, ThreadsafeFunction, ThreadsafeFunctionCallMode},
++};
++use once_cell::sync::{Lazy, OnceCell};
++use parking_lot::Mutex;
++use rustc_hash::FxHashMap;
++use tokio::{
++    io::{AsyncRead, AsyncWrite, ReadBuf},
++    sync::{Notify, mpsc},
++};
++
++fn unsupported() -> io::Error {
++    io::Error::new(
++        io::ErrorKind::Unsupported,
++        "no host process bridge is registered; JS evaluation (postcss/webpack loaders) needs a \
++         host that provides child processes + loopback TCP (require('next-swc-wasi/auto.cjs') \
++         registers one), or next.js >= 16.2 for the worker_threads pool",
++    )
++}
++
++// ---------------------------------------------------------------------------
++// Registered bridge + registries
++// ---------------------------------------------------------------------------
++
++struct SpawnReq {
++    proc_id: u32,
++    stdout_id: u32,
++    stderr_id: u32,
++    program: String,
++    args: Vec<String>,
++    cwd: String,
++    env: Vec<(String, String)>,
++}
++
++struct Bridge {
++    /// (SpawnReq) -> void; failures surface as an exit event + stderr bytes.
++    spawn: ThreadsafeFunction<SpawnReq>,
++    /// (streamId, bytes) -> void
++    write: ThreadsafeFunction<(u32, Vec<u8>)>,
++    /// (op, id) -> void; op in "kill" | "closeWrite" | "dropConn" | "closeListener"
++    action: ThreadsafeFunction<(String, u32)>,
++    /// (listenerId) -> Promise<port>; resolves once the loopback server listens.
++    listen: ThreadsafeFunction<u32>,
++}
++
++static BRIDGE: OnceCell<Bridge> = OnceCell::new();
++
++/// Rust-allocated ids (processes, listeners, child stdio streams) count up
++/// from 1; host-allocated ids (accepted connections) count down from
++/// u32::MAX. They meet in the middle after ~2 billion allocations each,
++/// which no build lives long enough to see.
++static NEXT_ID: AtomicU32 = AtomicU32::new(1);
++
++struct ExitState {
++    code: Mutex<Option<i32>>,
++    notify: Notify,
++}
++
++struct AcceptedConn {
++    conn_id: u32,
++    rx: mpsc::UnboundedReceiver<Vec<u8>>,
++}
++
++static STREAMS: Lazy<Mutex<FxHashMap<u32, mpsc::UnboundedSender<Vec<u8>>>>> =
++    Lazy::new(|| Mutex::new(FxHashMap::default()));
++static PROCS: Lazy<Mutex<FxHashMap<u32, Arc<ExitState>>>> =
++    Lazy::new(|| Mutex::new(FxHashMap::default()));
++static LISTENERS: Lazy<Mutex<FxHashMap<u32, mpsc::UnboundedSender<AcceptedConn>>>> =
++    Lazy::new(|| Mutex::new(FxHashMap::default()));
++
++fn bridge() -> io::Result<&'static Bridge> {
++    BRIDGE.get().ok_or_else(unsupported)
++}
++
++fn send_action(op: &str, id: u32) {
++    if let Some(b) = BRIDGE.get() {
++        b.action
++            .call(Ok((op.to_string(), id)), ThreadsafeFunctionCallMode::NonBlocking);
++    }
++}
++
++// ---------------------------------------------------------------------------
++// Host-facing napi entry points (called from the loader's JS)
++// ---------------------------------------------------------------------------
++
++/// Registers the host process bridge. First registration wins; later calls
++/// are no-ops (matches the fetch bridge and the other stored callbacks).
++#[napi_derive::napi(
++    ts_args_type = "spawn: (conversionError: Error | null, req: { procId: number, stdoutId: \
++                    number, stderrId: number, program: string, args: string[], cwd: string, env: \
++                    Record<string, string> }) => void, write: (conversionError: Error | null, \
++                    streamId: number, data: Buffer) => void, action: (conversionError: Error | \
++                    null, op: string, id: number) => void, listen: (conversionError: Error | \
++                    null, listenerId: number) => Promise<number>"
++)]
++pub fn init_turbopack_process_bridge(
++    env: Env,
++    spawn: JsFunction,
++    write: JsFunction,
++    action: JsFunction,
++    listen: JsFunction,
++) -> napi::Result<()> {
++    let mut spawn_tsfn: ThreadsafeFunction<SpawnReq> =
++        spawn.create_threadsafe_function(0, |ctx: ThreadSafeCallContext<SpawnReq>| {
++            let req = ctx.value;
++            let mut obj = ctx.env.create_object()?;
++            obj.set_named_property("procId", ctx.env.create_uint32(req.proc_id)?)?;
++            obj.set_named_property("stdoutId", ctx.env.create_uint32(req.stdout_id)?)?;
++            obj.set_named_property("stderrId", ctx.env.create_uint32(req.stderr_id)?)?;
++            obj.set_named_property("program", ctx.env.create_string(&req.program)?)?;
++            let mut args = ctx.env.create_array_with_length(req.args.len())?;
++            for (i, a) in req.args.iter().enumerate() {
++                args.set_element(i as u32, ctx.env.create_string(a)?)?;
++            }
++            obj.set_named_property("args", args)?;
++            obj.set_named_property("cwd", ctx.env.create_string(&req.cwd)?)?;
++            let mut envs = ctx.env.create_object()?;
++            for (k, v) in req.env.iter() {
++                envs.set_named_property(k, ctx.env.create_string(v)?)?;
++            }
++            obj.set_named_property("env", envs)?;
++            Ok(vec![obj.into_unknown()])
++        })?;
++    let mut write_tsfn: ThreadsafeFunction<(u32, Vec<u8>)> =
++        write.create_threadsafe_function(0, |ctx: ThreadSafeCallContext<(u32, Vec<u8>)>| {
++            let (id, bytes) = ctx.value;
++            Ok(vec![
++                ctx.env.create_uint32(id)?.into_unknown(),
++                ctx.env.create_buffer_with_data(bytes)?.into_unknown(),
++            ])
++        })?;
++    let mut action_tsfn: ThreadsafeFunction<(String, u32)> =
++        action.create_threadsafe_function(0, |ctx: ThreadSafeCallContext<(String, u32)>| {
++            let (op, id) = ctx.value;
++            Ok(vec![
++                ctx.env.create_string(&op)?.into_unknown(),
++                ctx.env.create_uint32(id)?.into_unknown(),
++            ])
++        })?;
++    let mut listen_tsfn: ThreadsafeFunction<u32> =
++        listen.create_threadsafe_function(0, |ctx: ThreadSafeCallContext<u32>| {
++            Ok(vec![ctx.env.create_uint32(ctx.value)?.into_unknown()])
++        })?;
++    // Don't keep the host event loop alive for the bridge (matches the other
++    // stored callbacks).
++    let _ = spawn_tsfn.unref(&env);
++    let _ = write_tsfn.unref(&env);
++    let _ = action_tsfn.unref(&env);
++    let _ = listen_tsfn.unref(&env);
++
++    let _ = BRIDGE.set(Bridge {
++        spawn: spawn_tsfn,
++        write: write_tsfn,
++        action: action_tsfn,
++        listen: listen_tsfn,
++    });
++    Ok(())
++}
++
++/// Byte push for any bridged read stream (child stdout/stderr, accepted
++/// connections). `None` data is EOF.
++#[napi_derive::napi]
++pub fn turbopack_pool_push_bytes(stream_id: u32, data: Option<Buffer>) {
++    match data {
++        Some(bytes) => {
++            let streams = STREAMS.lock();
++            if let Some(tx) = streams.get(&stream_id) {
++                // Receiver dropped just means the Rust side lost interest.
++                let _ = tx.send(bytes.to_vec());
++            }
++        }
++        None => {
++            // Dropping the sender closes the channel: poll_read sees EOF.
++            STREAMS.lock().remove(&stream_id);
++        }
++    }
++}
++
++/// Process exit (or spawn failure, reported as a nonzero code after pushing
++/// the error text to the stderr stream).
++#[napi_derive::napi]
++pub fn turbopack_pool_proc_exit(proc_id: u32, code: i32) {
++    let state = PROCS.lock().get(&proc_id).cloned();
++    if let Some(state) = state {
++        *state.code.lock() = Some(code);
++        state.notify.notify_waiters();
++    }
++}
++
++/// A connection landed on a bridged listener. The host has already allocated
++/// `conn_id` and will push its bytes; register the channel BEFORE returning
++/// so no data push can beat it.
++#[napi_derive::napi]
++pub fn turbopack_pool_accept(listener_id: u32, conn_id: u32) {
++    let (tx, rx) = mpsc::unbounded_channel();
++    STREAMS.lock().insert(conn_id, tx);
++    let listeners = LISTENERS.lock();
++    if let Some(l) = listeners.get(&listener_id) {
++        let _ = l.send(AcceptedConn { conn_id, rx });
++    } else {
++        drop(listeners);
++        STREAMS.lock().remove(&conn_id);
++        send_action("dropConn", conn_id);
++    }
++}
++
++// ---------------------------------------------------------------------------
++// Byte-stream plumbing
++// ---------------------------------------------------------------------------
++
++struct ByteRx {
++    rx: mpsc::UnboundedReceiver<Vec<u8>>,
++    /// Carry-over when a pushed chunk is bigger than the caller's buffer.
++    pending: Vec<u8>,
++    pos: usize,
++}
++
++impl ByteRx {
++    fn new(rx: mpsc::UnboundedReceiver<Vec<u8>>) -> Self {
++        ByteRx {
++            rx,
++            pending: Vec::new(),
++            pos: 0,
++        }
++    }
++
++    fn poll_read(&mut self, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
++        loop {
++            if self.pos < self.pending.len() {
++                let n = (self.pending.len() - self.pos).min(buf.remaining());
++                buf.put_slice(&self.pending[self.pos..self.pos + n]);
++                self.pos += n;
++                if self.pos == self.pending.len() {
++                    self.pending.clear();
++                    self.pos = 0;
++                }
++                return Poll::Ready(Ok(()));
++            }
++            match self.rx.poll_recv(cx) {
++                Poll::Ready(Some(bytes)) => {
++                    self.pending = bytes;
++                    self.pos = 0;
++                }
++                // Channel closed: EOF (zero bytes filled).
++                Poll::Ready(None) => return Poll::Ready(Ok(())),
++                Poll::Pending => return Poll::Pending,
++            }
++        }
++    }
++}
++
++fn poll_write_bridged(id: u32, buf: &[u8]) -> Poll<io::Result<usize>> {
++    let b = match bridge() {
++        Ok(b) => b,
++        Err(e) => return Poll::Ready(Err(e)),
++    };
++    b.write.call(
++        Ok((id, buf.to_vec())),
++        ThreadsafeFunctionCallMode::NonBlocking,
++    );
++    Poll::Ready(Ok(buf.len()))
++}
++
++// ---------------------------------------------------------------------------
++// Command / Child
++// ---------------------------------------------------------------------------
++
++pub struct Command {
++    program: String,
++    args: Vec<String>,
++    cwd: String,
++    env: Vec<(String, String)>,
++}
++
++impl Command {
++    pub fn new(program: impl AsRef<OsStr>) -> Self {
++        Command {
++            program: program.as_ref().to_string_lossy().into_owned(),
++            args: Vec::new(),
++            cwd: String::new(),
++            env: Vec::new(),
++        }
++    }
++
++    pub fn current_dir(&mut self, dir: impl AsRef<Path>) -> &mut Self {
++        self.cwd = dir.as_ref().to_string_lossy().into_owned();
++        self
++    }
++
++    pub fn arg(&mut self, arg: impl AsRef<OsStr>) -> &mut Self {
++        self.args.push(arg.as_ref().to_string_lossy().into_owned());
++        self
++    }
++
++    pub fn args(&mut self, args: impl IntoIterator<Item = impl AsRef<OsStr>>) -> &mut Self {
++        for arg in args {
++            self.arg(arg);
++        }
++        self
++    }
++
++    pub fn env(&mut self, key: impl AsRef<OsStr>, val: impl AsRef<OsStr>) -> &mut Self {
++        self.env.push((
++            key.as_ref().to_string_lossy().into_owned(),
++            val.as_ref().to_string_lossy().into_owned(),
++        ));
++        self
++    }
++
++    pub fn envs(
++        &mut self,
++        vars: impl IntoIterator<Item = (impl AsRef<OsStr>, impl AsRef<OsStr>)>,
++    ) -> &mut Self {
++        for (k, v) in vars {
++            self.env(k, v);
++        }
++        self
++    }
++
++    pub fn env_clear(&mut self) -> &mut Self {
++        self.env.clear();
++        self
++    }
++
++    // stdio is always piped over the bridge; these accept and ignore the
++    // configuration so pool.rs compiles unchanged.
++    pub fn stdin(&mut self, _cfg: Stdio) -> &mut Self {
++        self
++    }
++
++    pub fn stdout(&mut self, _cfg: Stdio) -> &mut Self {
++        self
++    }
++
++    pub fn stderr(&mut self, _cfg: Stdio) -> &mut Self {
++        self
++    }
++
++    // Bridged children are always killed on drop.
++    pub fn kill_on_drop(&mut self, _kill_on_drop: bool) -> &mut Self {
++        self
++    }
++
++    pub fn spawn(&mut self) -> io::Result<Child> {
++        let b = bridge()?;
++        let proc_id = NEXT_ID.fetch_add(3, Ordering::Relaxed);
++        let stdout_id = proc_id + 1;
++        let stderr_id = proc_id + 2;
++
++        let (stdout_tx, stdout_rx) = mpsc::unbounded_channel();
++        let (stderr_tx, stderr_rx) = mpsc::unbounded_channel();
++        {
++            let mut streams = STREAMS.lock();
++            streams.insert(stdout_id, stdout_tx);
++            streams.insert(stderr_id, stderr_tx);
++        }
++        let exit = Arc::new(ExitState {
++            code: Mutex::new(None),
++            notify: Notify::new(),
++        });
++        PROCS.lock().insert(proc_id, exit.clone());
++
++        b.spawn.call(
++            Ok(SpawnReq {
++                proc_id,
++                stdout_id,
++                stderr_id,
++                program: self.program.clone(),
++                args: self.args.clone(),
++                cwd: self.cwd.clone(),
++                env: self.env.clone(),
++            }),
++            ThreadsafeFunctionCallMode::NonBlocking,
++        );
++
++        Ok(Child {
++            proc_id,
++            exit,
++            killed: false,
++            stdin: None,
++            stdout: Some(ChildStdout(ByteRx::new(stdout_rx))),
++            stderr: Some(ChildStderr(ByteRx::new(stderr_rx))),
++        })
++    }
++}
++
++/// Exit status of a bridged child. `std::process::ExitStatus` has no public
++/// constructor (and no wasi `ExitStatusExt`), so the pool's wasm build uses
++/// this type instead — same `success`/`code`/`Display` surface.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub struct ExitStatus(i32);
++
++impl ExitStatus {
++    pub fn success(&self) -> bool {
++        self.0 == 0
++    }
++
++    pub fn code(&self) -> Option<i32> {
++        Some(self.0)
++    }
++}
++
++impl fmt::Display for ExitStatus {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        write!(f, "exit status: {}", self.0)
++    }
++}
++
++pub struct Child {
++    proc_id: u32,
++    exit: Arc<ExitState>,
++    killed: bool,
++    pub stdin: Option<ChildStdin>,
++    pub stdout: Option<ChildStdout>,
++    pub stderr: Option<ChildStderr>,
++}
++
++impl Child {
++    pub fn id(&self) -> Option<u32> {
++        if self.exit.code.lock().is_some() {
++            None
++        } else {
++            Some(self.proc_id)
++        }
++    }
++
++    pub fn start_kill(&mut self) -> io::Result<()> {
++        if !self.killed {
++            self.killed = true;
++            send_action("kill", self.proc_id);
++        }
++        Ok(())
++    }
++
++    pub async fn kill(&mut self) -> io::Result<()> {
++        self.start_kill()?;
++        let _ = self.wait().await?;
++        Ok(())
++    }
++
++    /// Cancel-safe, callable repeatedly (pool.rs races it against accept()
++    /// and calls it again from wait_or_kill).
++    pub async fn wait(&mut self) -> io::Result<ExitStatus> {
++        loop {
++            let notified = self.exit.notify.notified();
++            if let Some(code) = *self.exit.code.lock() {
++                return Ok(ExitStatus(code));
++            }
++            notified.await;
++        }
++    }
++}
++
++impl Drop for Child {
++    fn drop(&mut self) {
++        if self.exit.code.lock().is_none() && !self.killed {
++            send_action("kill", self.proc_id);
++        }
++        PROCS.lock().remove(&self.proc_id);
++    }
++}
++
++pub struct ChildStdout(ByteRx);
++
++pub struct ChildStderr(ByteRx);
++
++impl AsyncRead for ChildStdout {
++    fn poll_read(
++        self: Pin<&mut Self>,
++        cx: &mut Context<'_>,
++        buf: &mut ReadBuf<'_>,
++    ) -> Poll<io::Result<()>> {
++        self.get_mut().0.poll_read(cx, buf)
++    }
++}
++
++impl AsyncRead for ChildStderr {
++    fn poll_read(
++        self: Pin<&mut Self>,
++        cx: &mut Context<'_>,
++        buf: &mut ReadBuf<'_>,
++    ) -> Poll<io::Result<()>> {
++        self.get_mut().0.poll_read(cx, buf)
++    }
++}
++
++/// Never constructed (the pool does not pipe stdin), but the type must exist
++/// and write somewhere sensible if it ever is.
++pub struct ChildStdin {
++    stream_id: u32,
++}
++
++impl AsyncWrite for ChildStdin {
++    fn poll_write(
++        self: Pin<&mut Self>,
++        _cx: &mut Context<'_>,
++        buf: &[u8],
++    ) -> Poll<io::Result<usize>> {
++        poll_write_bridged(self.stream_id, buf)
++    }
++
++    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
++        Poll::Ready(Ok(()))
++    }
++
++    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
++        Poll::Ready(Ok(()))
++    }
++}
++
++// ---------------------------------------------------------------------------
++// TcpListener / TcpStream
++// ---------------------------------------------------------------------------
++
++pub struct TcpListener {
++    listener_id: u32,
++    port: u16,
++    // tokio Mutex: accept() holds it across an await (pool.rs only ever has
++    // one accept() in flight, but &self demands interior mutability).
++    accept_rx: tokio::sync::Mutex<mpsc::UnboundedReceiver<AcceptedConn>>,
++}
++
++impl TcpListener {
++    /// The pool only ever binds `127.0.0.1:0`; the host picks the port.
++    pub async fn bind(_addr: &str) -> io::Result<Self> {
++        let b = bridge()?;
++        let listener_id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
++        let (tx, rx) = mpsc::unbounded_channel();
++        LISTENERS.lock().insert(listener_id, tx);
++
++        let port = async {
++            let promise: Promise<u32> = b
++                .listen
++                .call_async(Ok(listener_id))
++                .await
++                .map_err(|e| io::Error::other(format!("host listen call failed: {e}")))?;
++            promise
++                .await
++                .map_err(|e| io::Error::other(format!("host listen failed: {e}")))
++        }
++        .await;
++        let port = match port {
++            Ok(p) => p as u16,
++            Err(e) => {
++                LISTENERS.lock().remove(&listener_id);
++                return Err(e);
++            }
++        };
++
++        Ok(TcpListener {
++            listener_id,
++            port,
++            accept_rx: tokio::sync::Mutex::new(rx),
++        })
++    }
++
++    pub fn local_addr(&self) -> io::Result<SocketAddr> {
++        Ok(SocketAddr::from(([127, 0, 0, 1], self.port)))
++    }
++
++    pub async fn accept(&self) -> io::Result<(TcpStream, SocketAddr)> {
++        let conn = self.accept_rx.lock().await.recv().await;
++        match conn {
++            Some(AcceptedConn { conn_id, rx }) => Ok((
++                TcpStream {
++                    conn_id,
++                    rx: ByteRx::new(rx),
++                    write_closed: false,
++                },
++                SocketAddr::from(([127, 0, 0, 1], 0)),
++            )),
++            None => Err(io::Error::other("host listener closed")),
++        }
++    }
++}
++
++impl Drop for TcpListener {
++    fn drop(&mut self) {
++        LISTENERS.lock().remove(&self.listener_id);
++        send_action("closeListener", self.listener_id);
++    }
++}
++
++pub struct TcpStream {
++    conn_id: u32,
++    rx: ByteRx,
++    write_closed: bool,
++}
++
++impl TcpStream {
++    pub fn set_nodelay(&self, _nodelay: bool) -> io::Result<()> {
++        // The bridge forwards writes immediately; nothing to configure.
++        Ok(())
++    }
++}
++
++impl AsyncRead for TcpStream {
++    fn poll_read(
++        self: Pin<&mut Self>,
++        cx: &mut Context<'_>,
++        buf: &mut ReadBuf<'_>,
++    ) -> Poll<io::Result<()>> {
++        self.get_mut().rx.poll_read(cx, buf)
++    }
++}
++
++impl AsyncWrite for TcpStream {
++    fn poll_write(
++        self: Pin<&mut Self>,
++        _cx: &mut Context<'_>,
++        buf: &[u8],
++    ) -> Poll<io::Result<usize>> {
++        poll_write_bridged(self.conn_id, buf)
++    }
++
++    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
++        Poll::Ready(Ok(()))
++    }
++
++    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
++        let this = self.get_mut();
++        if !this.write_closed {
++            this.write_closed = true;
++            send_action("closeWrite", this.conn_id);
++        }
++        Poll::Ready(Ok(()))
++    }
++}
++
++impl Drop for TcpStream {
++    fn drop(&mut self) {
++        STREAMS.lock().remove(&self.conn_id);
++        send_action("dropConn", self.conn_id);
++    }
++}
+diff --git a/turbopack/crates/turbopack-node/src/lib.rs b/turbopack/crates/turbopack-node/src/lib.rs
+index c9c043ee..4774cc49 100644
+--- a/turbopack/crates/turbopack-node/src/lib.rs
++++ b/turbopack/crates/turbopack-node/src/lib.rs
+@@ -19,6 +19,12 @@ pub mod evaluate;
+ pub mod execution_context;
+ mod heap_queue;
+ mod pool;
++// Host-bridged stand-ins for tokio's process/net APIs (which don't exist on
++// wasi): the napi host registers child_process/net callbacks through the
++// binding, and the child-process pool runs unchanged over them. No bridge
++// registered -> spawning fails at runtime with Unsupported.
++#[cfg(target_family = "wasm")]
++pub mod host_pool;
+ pub mod source_map;
+ pub mod transforms;
+ 
+diff --git a/turbopack/crates/turbopack-node/src/pool.rs b/turbopack/crates/turbopack-node/src/pool.rs
+index 3618ba73..a0eb2213 100644
+--- a/turbopack/crates/turbopack-node/src/pool.rs
++++ b/turbopack/crates/turbopack-node/src/pool.rs
+@@ -4,10 +4,14 @@ use std::{
+     future::Future,
+     mem::take,
+     path::{Path, PathBuf},
+-    process::{ExitStatus, Stdio},
++    process::Stdio,
+     sync::Arc,
+     time::{Duration, Instant},
+ };
++// std's ExitStatus has no public constructor (and no wasi ExitStatusExt), so
++// bridged children report through host_pool's own status type.
++#[cfg(not(target_family = "wasm"))]
++use std::process::ExitStatus;
+ 
+ use anyhow::{Context, Result, bail};
+ use futures::join;
+@@ -31,7 +35,9 @@ use tokio::{
+     process::{Child, ChildStderr, ChildStdout, Command},
+ };
+ #[cfg(target_family = "wasm")]
+-use crate::wasi_stubs::{Child, ChildStderr, ChildStdout, Command, TcpListener, TcpStream};
++use crate::host_pool::{
++    Child, ChildStderr, ChildStdout, Command, ExitStatus, TcpListener, TcpStream,
++};
+ use turbo_rcstr::RcStr;
+ use turbo_tasks::{FxIndexSet, ResolvedVc, Vc, duration_span};
+ use turbo_tasks_fs::{FileSystemPath, json::parse_json_with_source_context};
+diff --git a/turbopack/crates/turbopack-node/src/wasi_stubs.rs b/turbopack/crates/turbopack-node/src/wasi_stubs.rs
+deleted file mode 100644
+index 8e48c98d..00000000
+--- a/turbopack/crates/turbopack-node/src/wasi_stubs.rs
++++ /dev/null
+@@ -1,199 +0,0 @@
+-//! Type-compatible stand-ins for the tokio process/net APIs used by the
+-//! child-process pool. wasi has no subprocesses or TCP sockets, and tokio
+-//! does not even compile those modules there. `Command::spawn` and
+-//! `TcpListener::bind` fail at runtime with `Unsupported`; everything
+-//! downstream of them is unreachable but must still type-check so the pool
+-//! compiles on wasm targets.
+-#![allow(dead_code)]
+-
+-use std::{
+-    convert::Infallible,
+-    ffi::OsStr,
+-    io,
+-    net::SocketAddr,
+-    path::Path,
+-    pin::Pin,
+-    process::{ExitStatus, Stdio},
+-    task::{Context, Poll},
+-};
+-
+-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+-
+-fn unsupported() -> io::Error {
+-    io::Error::new(
+-        io::ErrorKind::Unsupported,
+-        "child processes and TCP sockets are not available on wasi; JS evaluation \
+-         (postcss/webpack loaders) needs the worker_threads pool from next.js >= 16.2",
+-    )
+-}
+-
+-pub struct Command;
+-
+-impl Command {
+-    pub fn new(_program: impl AsRef<OsStr>) -> Self {
+-        Command
+-    }
+-
+-    pub fn current_dir(&mut self, _dir: impl AsRef<Path>) -> &mut Self {
+-        self
+-    }
+-
+-    pub fn arg(&mut self, _arg: impl AsRef<OsStr>) -> &mut Self {
+-        self
+-    }
+-
+-    pub fn args(&mut self, _args: impl IntoIterator<Item = impl AsRef<OsStr>>) -> &mut Self {
+-        self
+-    }
+-
+-    pub fn env(&mut self, _key: impl AsRef<OsStr>, _val: impl AsRef<OsStr>) -> &mut Self {
+-        self
+-    }
+-
+-    pub fn envs(
+-        &mut self,
+-        _vars: impl IntoIterator<Item = (impl AsRef<OsStr>, impl AsRef<OsStr>)>,
+-    ) -> &mut Self {
+-        self
+-    }
+-
+-    pub fn env_clear(&mut self) -> &mut Self {
+-        self
+-    }
+-
+-    pub fn stdin(&mut self, _cfg: Stdio) -> &mut Self {
+-        self
+-    }
+-
+-    pub fn stdout(&mut self, _cfg: Stdio) -> &mut Self {
+-        self
+-    }
+-
+-    pub fn stderr(&mut self, _cfg: Stdio) -> &mut Self {
+-        self
+-    }
+-
+-    pub fn kill_on_drop(&mut self, _kill_on_drop: bool) -> &mut Self {
+-        self
+-    }
+-
+-    pub fn spawn(&mut self) -> io::Result<Child> {
+-        Err(unsupported())
+-    }
+-}
+-
+-pub struct Child {
+-    pub stdin: Option<ChildStdin>,
+-    pub stdout: Option<ChildStdout>,
+-    pub stderr: Option<ChildStderr>,
+-    never: Infallible,
+-}
+-
+-impl Child {
+-    pub fn id(&self) -> Option<u32> {
+-        match self.never {}
+-    }
+-
+-    pub fn start_kill(&mut self) -> io::Result<()> {
+-        match self.never {}
+-    }
+-
+-    pub async fn kill(&mut self) -> io::Result<()> {
+-        match self.never {}
+-    }
+-
+-    pub async fn wait(&mut self) -> io::Result<ExitStatus> {
+-        match self.never {}
+-    }
+-}
+-
+-macro_rules! stub_read_stream {
+-    ($name:ident) => {
+-        pub struct $name(Infallible);
+-
+-        impl AsyncRead for $name {
+-            fn poll_read(
+-                self: Pin<&mut Self>,
+-                _cx: &mut Context<'_>,
+-                _buf: &mut ReadBuf<'_>,
+-            ) -> Poll<io::Result<()>> {
+-                match self.get_mut().0 {}
+-            }
+-        }
+-    };
+-}
+-
+-stub_read_stream!(ChildStdout);
+-stub_read_stream!(ChildStderr);
+-
+-pub struct ChildStdin(Infallible);
+-
+-impl AsyncWrite for ChildStdin {
+-    fn poll_write(
+-        self: Pin<&mut Self>,
+-        _cx: &mut Context<'_>,
+-        _buf: &[u8],
+-    ) -> Poll<io::Result<usize>> {
+-        match self.get_mut().0 {}
+-    }
+-
+-    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+-        match self.get_mut().0 {}
+-    }
+-
+-    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+-        match self.get_mut().0 {}
+-    }
+-}
+-
+-pub struct TcpListener(Infallible);
+-
+-impl TcpListener {
+-    pub async fn bind(_addr: &str) -> io::Result<Self> {
+-        Err(unsupported())
+-    }
+-
+-    pub fn local_addr(&self) -> io::Result<SocketAddr> {
+-        match self.0 {}
+-    }
+-
+-    pub async fn accept(&self) -> io::Result<(TcpStream, SocketAddr)> {
+-        match self.0 {}
+-    }
+-}
+-
+-pub struct TcpStream(Infallible);
+-
+-impl TcpStream {
+-    pub fn set_nodelay(&self, _nodelay: bool) -> io::Result<()> {
+-        match self.0 {}
+-    }
+-}
+-
+-impl AsyncRead for TcpStream {
+-    fn poll_read(
+-        self: Pin<&mut Self>,
+-        _cx: &mut Context<'_>,
+-        _buf: &mut ReadBuf<'_>,
+-    ) -> Poll<io::Result<()>> {
+-        match self.get_mut().0 {}
+-    }
+-}
+-
+-impl AsyncWrite for TcpStream {
+-    fn poll_write(
+-        self: Pin<&mut Self>,
+-        _cx: &mut Context<'_>,
+-        _buf: &[u8],
+-    ) -> Poll<io::Result<usize>> {
+-        match self.get_mut().0 {}
+-    }
+-
+-    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+-        match self.get_mut().0 {}
+-    }
+-
+-    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+-        match self.get_mut().0 {}
+-    }
+-}
+-- 
+2.50.1 (Apple Git-155)
+
