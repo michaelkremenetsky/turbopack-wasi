@@ -35,6 +35,15 @@ fi
 # the changed lines themselves still have to match, real conflicts still fail
 # (loudly, with .rej files), and the result is compile-checked by the build.
 for p in $(ls "$SERIES"/*.patch | grep -v '0009-next-napi-bindings-fix-wasi-linking'); do
+  # A patch that reverse-applies cleanly is already in the tree — upstream took
+  # the fix (e.g. the watcher follow_symlinks bug, fixed in newer 16.2.x while
+  # older tags still need it). Skip it instead of failing the series; this only
+  # works when our patch mirrors upstream's change verbatim, which is the
+  # convention for anything upstreamable.
+  if git -C "$CHECKOUT" apply --reverse --check "$p" >/dev/null 2>&1; then
+    echo "skipping $(basename "$p"): already applied upstream"
+    continue
+  fi
   if ! git -C "$CHECKOUT" am --3way "$p" >/dev/null 2>&1; then
     git -C "$CHECKOUT" am --quit >/dev/null 2>&1 || true
     echo "am failed for $(basename "$p"); retrying with patch --fuzz=3" >&2

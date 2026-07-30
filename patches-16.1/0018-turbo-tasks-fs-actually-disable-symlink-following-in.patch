@@ -1,4 +1,4 @@
-From 8e3e3f216f74b58ea7a05a9d9b67f63789a823eb Mon Sep 17 00:00:00 2001
+From fb8f8cdc230ee9ef254752e78671bc1389a111fb Mon Sep 17 00:00:00 2001
 From: michaelkremenetsky
  <28833521+michaelkremenetsky@users.noreply.github.com>
 Date: Wed, 29 Jul 2026 20:12:19 -0700
@@ -15,33 +15,26 @@ notify's poll walker routes symlink checks through same-file, which is
 unsupported there, so every watched directory yields an error event
 ("same-file is not supported on this platform") — and the error handler
 invalidates the whole tree each time. Hundreds of log lines and recompute
-storms per dev boot. Assign the builder result and hand the same config to
-the recommended-watcher branch (which was constructing a fresh default).
+storms per dev boot.
 
-Upstreamable as-is; the wasi symptom is just the loudest victim of the
-dropped return value.
+The change mirrors the fix newer 16.2.x releases carry verbatim (assign
+the builder result; pass the same config to the recommended-watcher
+branch), so on trees that already have it this patch reverse-applies
+cleanly and the apply script skips it.
 ---
- turbopack/crates/turbo-tasks-fs/src/watcher.rs | 11 +++++++----
- 1 file changed, 7 insertions(+), 4 deletions(-)
+ turbopack/crates/turbo-tasks-fs/src/watcher.rs | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
 
 diff --git a/turbopack/crates/turbo-tasks-fs/src/watcher.rs b/turbopack/crates/turbo-tasks-fs/src/watcher.rs
-index 02a0e1d21f9be1ef1776275ceac16040964a4252..c972d5185b85695dabf1ff6128fbb76975d7b2bd 100644
+index 02a0e1d21f9be1ef1776275ceac16040964a4252..90b2ae531d46ad340a66f5ca81c96a30b9751f7b 100644
 --- a/turbopack/crates/turbo-tasks-fs/src/watcher.rs
 +++ b/turbopack/crates/turbo-tasks-fs/src/watcher.rs
-@@ -376,16 +376,19 @@ impl DiskWatcher {
-         let (tx, rx) = channel();
-         // Create a watcher object, delivering debounced events.
-         // The notification back-end is selected based on the platform.
--        let config = Config::default();
+@@ -379,13 +379,13 @@ impl DiskWatcher {
+         let config = Config::default();
          // we should track and invalidate each part of a symlink chain ourselves in
--        // turbo-tasks-fs
+         // turbo-tasks-fs
 -        config.with_follow_symlinks(false);
-+        // turbo-tasks-fs. (`with_follow_symlinks` is a by-value builder; the
-+        // original code discarded its return value, leaving symlink-following
-+        // ON. On wasi that makes notify's poll walker go through `same-file`,
-+        // which is unsupported there — one error event per watched directory,
-+        // each of which invalidates the whole tree.)
-+        let config = Config::default().with_follow_symlinks(false);
++        let config = config.with_follow_symlinks(false);
  
          let mut notify_watcher = if let Some(poll_interval) = poll_interval {
              let config = config.with_poll_interval(poll_interval);
