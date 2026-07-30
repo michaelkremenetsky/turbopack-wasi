@@ -1,0 +1,57 @@
+From 8e3e3f216f74b58ea7a05a9d9b67f63789a823eb Mon Sep 17 00:00:00 2001
+From: michaelkremenetsky
+ <28833521+michaelkremenetsky@users.noreply.github.com>
+Date: Wed, 29 Jul 2026 20:12:19 -0700
+Subject: [PATCH] turbo-tasks-fs: actually disable symlink-following in the
+ notify watcher
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Upstream already wants this ("we should track and invalidate each part of
+a symlink chain ourselves") but calls the by-value builder and discards
+the result, so follow_symlinks stays on. On wasi the consequence is nasty:
+notify's poll walker routes symlink checks through same-file, which is
+unsupported there, so every watched directory yields an error event
+("same-file is not supported on this platform") — and the error handler
+invalidates the whole tree each time. Hundreds of log lines and recompute
+storms per dev boot. Assign the builder result and hand the same config to
+the recommended-watcher branch (which was constructing a fresh default).
+
+Upstreamable as-is; the wasi symptom is just the loudest victim of the
+dropped return value.
+---
+ turbopack/crates/turbo-tasks-fs/src/watcher.rs | 11 +++++++----
+ 1 file changed, 7 insertions(+), 4 deletions(-)
+
+diff --git a/turbopack/crates/turbo-tasks-fs/src/watcher.rs b/turbopack/crates/turbo-tasks-fs/src/watcher.rs
+index 02a0e1d21f9be1ef1776275ceac16040964a4252..c972d5185b85695dabf1ff6128fbb76975d7b2bd 100644
+--- a/turbopack/crates/turbo-tasks-fs/src/watcher.rs
++++ b/turbopack/crates/turbo-tasks-fs/src/watcher.rs
+@@ -376,16 +376,19 @@ impl DiskWatcher {
+         let (tx, rx) = channel();
+         // Create a watcher object, delivering debounced events.
+         // The notification back-end is selected based on the platform.
+-        let config = Config::default();
+         // we should track and invalidate each part of a symlink chain ourselves in
+-        // turbo-tasks-fs
+-        config.with_follow_symlinks(false);
++        // turbo-tasks-fs. (`with_follow_symlinks` is a by-value builder; the
++        // original code discarded its return value, leaving symlink-following
++        // ON. On wasi that makes notify's poll walker go through `same-file`,
++        // which is unsupported there — one error event per watched directory,
++        // each of which invalidates the whole tree.)
++        let config = Config::default().with_follow_symlinks(false);
+ 
+         let mut notify_watcher = if let Some(poll_interval) = poll_interval {
+             let config = config.with_poll_interval(poll_interval);
+             NotifyWatcher::Polling(PollWatcher::new(tx, config)?)
+         } else {
+-            NotifyWatcher::Recommended(RecommendedWatcher::new(tx, Config::default())?)
++            NotifyWatcher::Recommended(RecommendedWatcher::new(tx, config)?)
+         };
+ 
+         // TOCTOU: we must watch `root_path` before calling any invalidators and setting up the
+-- 
+2.50.1 (Apple Git-155)
+

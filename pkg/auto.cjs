@@ -74,7 +74,8 @@ if (!globalThis.__nextSwcWasiAuto) {
               return function warn(...args) {
                 if (
                   typeof args[0] === 'string' &&
-                  args[0].indexOf('next-swc does not have native bindings') !== -1
+                  (args[0].indexOf('next-swc does not have native bindings') !== -1 ||
+                    args[0].indexOf('Trying to load next-swc for unsupported platforms') !== -1)
                 ) {
                   return;
                 }
