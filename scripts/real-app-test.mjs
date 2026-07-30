@@ -253,7 +253,11 @@ const project = await bindings.turbo.createProject(
     noMangling: false,
     writeRoutesHashesManifest: false,
     currentNodeJsVersion: process.versions.node,
-    isPersistentCachingEnabled: false,
+    // true ON PURPOSE: next dev enables persistent caching by default, and the
+    // on-disk store wedges on wasi — the binding must force the in-memory
+    // store regardless of this flag (a false here would hide that regression;
+    // it did once, for the whole pre-16.2 backfill).
+    isPersistentCachingEnabled: true,
     nextVersion: process.env.NEXT_FIXTURE_VERSION ?? '16.2.10',
     serverHmr: false,
   },

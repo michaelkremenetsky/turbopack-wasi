@@ -1,0 +1,40 @@
+From 09d306aa33b62e54764954ba27a54690b990fbba Mon Sep 17 00:00:00 2001
+From: michaelkremenetsky
+ <28833521+michaelkremenetsky@users.noreply.github.com>
+Date: Wed, 29 Jul 2026 18:49:32 -0700
+Subject: [PATCH] next-swc-napi: force the in-memory turbo-tasks store on wasi
+
+The on-disk persistence store trips its write-batch concurrency assertion
+under compile load on wasi ("Another write batch or compaction is already
+active") and wedges the first compile. The 16.2 series already forces the
+in-memory (noop) backing storage there (patch 13); the pre-16.2 series
+never picked that up because JS evaluation used to be impossible on these
+versions anyway, so nothing ever compiled far enough to hit the store.
+Same override, same spot.
+---
+ crates/napi/src/next_api/turbopack_ctx.rs | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/crates/napi/src/next_api/turbopack_ctx.rs b/crates/napi/src/next_api/turbopack_ctx.rs
+index 384dbc1cbe0a31e9e27b11af46baabef4342e330..4e5025d4057817fb8cb62910efd0799d83561c2e 100644
+--- a/crates/napi/src/next_api/turbopack_ctx.rs
++++ b/crates/napi/src/next_api/turbopack_ctx.rs
+@@ -188,6 +188,15 @@ pub fn create_turbo_tasks(
+     is_ci: bool,
+     is_short_session: bool,
+ ) -> Result<NextTurboTasks> {
++    // The on-disk persistence store is not functional on wasi (write-batch
++    // concurrency assertions trip under compile load: "Another write batch or
++    // compaction is already active"); always run the in-memory (noop) backing
++    // storage there, whatever the config says. Mirrors the 16.2 series.
++    #[cfg(target_os = "wasi")]
++    let persistent_caching = {
++        let _ = persistent_caching;
++        false
++    };
+     Ok(if persistent_caching {
+         let version_info = GitVersionInfo {
+             describe: env!("VERGEN_GIT_DESCRIBE"),
+-- 
+2.50.1 (Apple Git-155)
+
