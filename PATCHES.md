@@ -64,6 +64,17 @@ The series, in order:
 | 14 | turbo-tasks-fs | skip watching nonexistent dirs on wasi. notify's PollWatcher fallback reports them as async Io error events ("watch error" spam + spurious invalidations); inotify's synchronous PathNotFound was already swallowed, so match that |
 | 15 | turbo-tasks-fetch/bindings | host fetch bridge on wasm: `initTurbopackFetchBridge(handler)` lets the loader register a node http client, so `next/font` Google Fonts downloads work. No handler registered keeps the resolve-to-issue behavior from patch 6 |
 
+Patches 16-20 are `patches/`-only (16.3+); they landed with the 16.3.0 rebase
+and the nightly bump that came with it:
+
+| # | patch | what / why |
+|---|-------|------------|
+| 16 | turbo-tasks | `block_on` the new synchronous `EventListener::wait` on wasm (`event_listener` compiles its blocking `Listener::wait` out on `target_family = "wasm"`; wasm32-wasip1-threads can block, so drive the listener future instead) |
+| 17 | turbo-rcstr | build `rcstr!` statics at runtime on 16/32-bit targets — the proc-macro emits a runtime `from_static` on wasm32, where turbo-rcstr's tagged-pointer representation makes the `const` path fail const-eval |
+| 18 | next / turbopack | convert non-inline (`>7` char) `const RcStr = rcstr!(...)` module constants to `static LazyLock<RcStr>` (const-eval can't turn the interned static's pointer into an integer on wasm32) and deref at the use sites; inline literals like `"project"` stay `const` |
+| 19 | turbopack-ecmascript-plugins, next-napi-bindings | drop the wasmtime SWC-plugin backend on wasm. It can't run a wasm plugin inside a wasm guest and pulls in `cap-std`/`cap-primitives`/`wasi-common`, which stopped building for wasi (recent std dropped the `wasi_ext` metadata/open-options methods those crates use). Gate the dep on `cfg(not(target_family = "wasm"))` and swap `WasmtimeRuntime` for a `NoopRuntime` stub, keeping swc_core's pure-Rust plugin *host* types |
+| 20 | turbo-tasks-fetch | update the wasm fetch client for the 16.3.0 API: `session_dependent` became a `#[turbo_tasks::function]` flag (was a free `mark_session_dependent()` call), and `FetchClientConfig` grew timeout/retry fields the shared construction site now sets |
+
 About those 16MB stacks in patch 11: not optional. Wasm shadow-stack frames
 run several times larger than native and the 2MB default overflows under
 compile load.
@@ -77,9 +88,11 @@ The fork gates on `any(not(target_family = "wasm"), target_feature =
 "atomics")` instead, which is the shape I'd propose upstream.
 
 Still native-only, on purpose: `css` (lightningcss-napi), the turbopack trace
-server, swc wasm plugins. Persistent caching compiles but only the in-memory
-(`noop`) backing store has been exercised. Don't trust the on-disk store on
-wasi yet.
+server, and swc wasm plugins — the last now explicitly, via patch 19's
+`NoopRuntime` (executing a wasm plugin returns an error rather than silently
+no-op'ing; an app with no configured plugins never reaches it). Persistent
+caching compiles but only the in-memory (`noop`) backing store has been
+exercised. Don't trust the on-disk store on wasi yet.
 
 ## Building
 

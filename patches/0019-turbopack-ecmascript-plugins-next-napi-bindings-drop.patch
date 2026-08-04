@@ -1,0 +1,226 @@
+From 65c907e8dd22f4cba9ae340faf2c3f6469476c57 Mon Sep 17 00:00:00 2001
+From: turbopack-wasi build <build@turbopack-wasi.invalid>
+Date: Tue, 4 Aug 2026 12:42:22 -0700
+Subject: [PATCH 19/20] turbopack-ecmascript-plugins, next-napi-bindings: drop
+ the wasmtime SWC plugin backend on wasm
+
+SWC transform plugins are themselves WebAssembly modules, executed by an
+embedded wasm runtime (swc_plugin_backend_wasmtime -> wasmtime). That backend
+can't run inside a wasm guest, and it pulls in the cap-std / cap-primitives /
+wasi-common stack, which no longer builds for wasm32-wasip1-threads (recent std
+dropped the wasi_ext OpenOptionsExt/MetadataExt methods those crates rely on).
+
+`swc_plugin_backend_wasmtime` is the sole path to that whole stack, so gate the
+dependency behind `cfg(not(target_family = "wasm"))` and swap the concrete
+`WasmtimeRuntime` for a small `NoopRuntime` stub that implements
+`swc_plugin_runner::runtime::Runtime`. The plugin *host* types (from swc_core's
+__plugin_transform_host feature, pure Rust) stay, so the transform pipeline
+type-checks unchanged. Constructing/cloning plugin modules still works; an app
+with no configured SWC plugins never touches the runtime, and actually invoking
+one returns a clear error instead of silently doing nothing.
+---
+ crates/next-napi-bindings/src/lib.rs          |  6 +++
+ crates/next-napi-bindings/src/transform.rs    |  3 ++
+ .../src/wasm_noop_runtime.rs                  | 44 ++++++++++++++++++
+ .../turbopack-ecmascript-plugins/Cargo.toml   |  7 ++-
+ .../turbopack-ecmascript-plugins/src/lib.rs   |  6 +++
+ .../transform/swc_ecma_transform_plugins.rs   |  6 +++
+ .../src/wasm_noop_runtime.rs                  | 45 +++++++++++++++++++
+ 7 files changed, 116 insertions(+), 1 deletion(-)
+ create mode 100644 crates/next-napi-bindings/src/wasm_noop_runtime.rs
+ create mode 100644 turbopack/crates/turbopack-ecmascript-plugins/src/wasm_noop_runtime.rs
+
+diff --git a/crates/next-napi-bindings/src/lib.rs b/crates/next-napi-bindings/src/lib.rs
+index e95df2d6..6c5b209d 100644
+--- a/crates/next-napi-bindings/src/lib.rs
++++ b/crates/next-napi-bindings/src/lib.rs
+@@ -53,6 +53,12 @@ pub mod parse;
+ pub mod react_compiler;
+ pub mod rspack;
+ pub mod transform;
++
++// On wasm host targets the wasmtime plugin backend is dropped (it can't run
++// inside a wasm guest and won't build for wasi); this provides the stub
++// runtime that stands in for it. See `wasm_noop_runtime` for the rationale.
++#[cfg(target_family = "wasm")]
++pub mod wasm_noop_runtime;
+ #[cfg(not(target_arch = "wasm32"))]
+ pub mod turbo_trace_server;
+ pub mod turbopack;
+diff --git a/crates/next-napi-bindings/src/transform.rs b/crates/next-napi-bindings/src/transform.rs
+index 7bc25eb9..b9c53031 100644
+--- a/crates/next-napi-bindings/src/transform.rs
++++ b/crates/next-napi-bindings/src/transform.rs
+@@ -45,7 +45,10 @@ use swc_core::{
+     common::{FileName, GLOBALS, Mark, comments::SingleThreadedComments, errors::ColorConfig},
+     ecma::ast::noop_pass,
+ };
++#[cfg(not(target_family = "wasm"))]
+ use swc_plugin_backend_wasmtime::WasmtimeRuntime;
++#[cfg(target_family = "wasm")]
++use crate::wasm_noop_runtime::NoopRuntime as WasmtimeRuntime;
+ 
+ use crate::{complete_output, get_compiler, util::MapErr};
+ 
+diff --git a/crates/next-napi-bindings/src/wasm_noop_runtime.rs b/crates/next-napi-bindings/src/wasm_noop_runtime.rs
+new file mode 100644
+index 00000000..7fc33247
+--- /dev/null
++++ b/crates/next-napi-bindings/src/wasm_noop_runtime.rs
+@@ -0,0 +1,44 @@
++//! A no-op SWC plugin runtime for `wasm` host targets.
++//!
++//! SWC transform plugins are themselves WebAssembly modules, executed by an
++//! embedded wasm runtime (`swc_plugin_backend_wasmtime`, i.e. wasmtime). That
++//! backend cannot run inside a wasm guest, and it pulls in the
++//! `cap-std`/`wasi-common` stack, which does not build for
++//! `wasm32-wasip1-threads`. The transform pipeline still wants a plugin
++//! runtime to hand to swc, so on wasm we drop the wasmtime backend and swap the
++//! concrete `WasmtimeRuntime` for this stub.
++//!
++//! An app with no configured SWC plugins never reaches the point of executing
++//! one; actually running a plugin returns a clear error instead of silently
++//! doing nothing.
++
++use swc_core::plugin_runner::runtime::{Func, Instance, Module, ModuleCache, Runtime};
++
++#[derive(Debug)]
++pub struct NoopRuntime;
++
++impl Runtime for NoopRuntime {
++    fn identifier(&self) -> &'static str {
++        "noop-wasm (SWC wasm plugins unsupported on wasm host targets)"
++    }
++
++    fn prepare_module(&self, _bytes: &[u8]) -> anyhow::Result<ModuleCache> {
++        // Return an opaque placeholder so plugin-module construction succeeds;
++        // the failure is deferred to `init`, where a plugin would actually run.
++        Ok(ModuleCache(Box::new(())))
++    }
++
++    fn init(
++        &self,
++        _name: &str,
++        _imports: Vec<(String, Func)>,
++        _envs: Vec<(String, String)>,
++        _module: Module,
++    ) -> anyhow::Result<Box<dyn Instance>> {
++        anyhow::bail!("SWC wasm transform plugins are not supported on wasm host targets")
++    }
++
++    fn clone_cache(&self, _cache: &ModuleCache) -> Option<ModuleCache> {
++        Some(ModuleCache(Box::new(())))
++    }
++}
+diff --git a/turbopack/crates/turbopack-ecmascript-plugins/Cargo.toml b/turbopack/crates/turbopack-ecmascript-plugins/Cargo.toml
+index 66621d88..22ee8b6b 100644
+--- a/turbopack/crates/turbopack-ecmascript-plugins/Cargo.toml
++++ b/turbopack/crates/turbopack-ecmascript-plugins/Cargo.toml
+@@ -41,7 +41,12 @@ swc_core = { workspace = true, features = [
+   "__plugin_transform_host",
+   "__plugin_transform_host_schema_v1",
+ ] }
+-swc_plugin_backend_wasmtime = { workspace = true }
+ swc_emotion = { workspace = true }
+ swc_relay = { workspace = true }
+ 
++# The wasmtime SWC-plugin backend can't run inside a wasm guest and pulls in
++# cap-std/wasi-common (which don't build for wasm32-wasip1-threads). On wasm we
++# swap it for a stub runtime (`wasm_noop_runtime`); everywhere else it's used.
++[target.'cfg(not(target_family = "wasm"))'.dependencies]
++swc_plugin_backend_wasmtime = { workspace = true }
++
+diff --git a/turbopack/crates/turbopack-ecmascript-plugins/src/lib.rs b/turbopack/crates/turbopack-ecmascript-plugins/src/lib.rs
+index 72880312..c2aef18b 100644
+--- a/turbopack/crates/turbopack-ecmascript-plugins/src/lib.rs
++++ b/turbopack/crates/turbopack-ecmascript-plugins/src/lib.rs
+@@ -2,3 +2,9 @@
+ #![feature(arbitrary_self_types_pointers)]
+ 
+ pub mod transform;
++
++// On wasm host targets the wasmtime plugin backend is dropped (it can't run
++// inside a wasm guest and won't build for wasi); this provides the stub
++// runtime that stands in for it. See `wasm_noop_runtime` for the rationale.
++#[cfg(target_family = "wasm")]
++pub mod wasm_noop_runtime;
+diff --git a/turbopack/crates/turbopack-ecmascript-plugins/src/transform/swc_ecma_transform_plugins.rs b/turbopack/crates/turbopack-ecmascript-plugins/src/transform/swc_ecma_transform_plugins.rs
+index 982b8a73..901411c7 100644
+--- a/turbopack/crates/turbopack-ecmascript-plugins/src/transform/swc_ecma_transform_plugins.rs
++++ b/turbopack/crates/turbopack-ecmascript-plugins/src/transform/swc_ecma_transform_plugins.rs
+@@ -4,7 +4,10 @@ use swc_core::{
+     ecma::ast::Program,
+     plugin_runner::plugin_module_bytes::{CompiledPluginModuleBytes, RawPluginModuleBytes},
+ };
++#[cfg(not(target_family = "wasm"))]
+ use swc_plugin_backend_wasmtime::WasmtimeRuntime;
++#[cfg(target_family = "wasm")]
++use crate::wasm_noop_runtime::NoopRuntime as WasmtimeRuntime;
+ use turbo_rcstr::{RcStr, rcstr};
+ use turbo_tasks_fs::FileSystemPath;
+ use turbopack_core::issue::{Issue, IssueSeverity, IssueStage, StyledString};
+@@ -116,7 +119,10 @@ impl CustomTransformer for SwcEcmaTransformPluginsTransformer {
+             plugin::proxies::{COMMENTS, HostCommentsStorage},
+             plugin_runner::plugin_module_bytes::CompiledPluginModuleBytes,
+         };
++        #[cfg(not(target_family = "wasm"))]
+         use swc_plugin_backend_wasmtime::WasmtimeRuntime;
++        #[cfg(target_family = "wasm")]
++        use crate::wasm_noop_runtime::NoopRuntime as WasmtimeRuntime;
+         use turbo_tasks::TryJoinIterExt;
+ 
+         let plugins = self
+diff --git a/turbopack/crates/turbopack-ecmascript-plugins/src/wasm_noop_runtime.rs b/turbopack/crates/turbopack-ecmascript-plugins/src/wasm_noop_runtime.rs
+new file mode 100644
+index 00000000..6054533e
+--- /dev/null
++++ b/turbopack/crates/turbopack-ecmascript-plugins/src/wasm_noop_runtime.rs
+@@ -0,0 +1,45 @@
++//! A no-op SWC plugin runtime for `wasm` host targets.
++//!
++//! SWC transform plugins are themselves WebAssembly modules, executed by an
++//! embedded wasm runtime (`swc_plugin_backend_wasmtime`, i.e. wasmtime). That
++//! backend cannot run inside a wasm guest, and it pulls in the
++//! `cap-std`/`wasi-common` stack, which does not build for
++//! `wasm32-wasip1-threads`. Turbopack still wants the plugin *host* types so
++//! the transform pipeline type-checks, so on wasm we drop the wasmtime backend
++//! and swap the concrete `WasmtimeRuntime` for this stub.
++//!
++//! Constructing and cloning plugin modules keeps working — an app with no
++//! configured SWC plugins never reaches the point of executing one — while
++//! actually running a plugin returns a clear error instead of silently doing
++//! nothing.
++
++use swc_core::plugin_runner::runtime::{Func, Instance, Module, ModuleCache, Runtime};
++
++#[derive(Debug)]
++pub struct NoopRuntime;
++
++impl Runtime for NoopRuntime {
++    fn identifier(&self) -> &'static str {
++        "noop-wasm (SWC wasm plugins unsupported on wasm host targets)"
++    }
++
++    fn prepare_module(&self, _bytes: &[u8]) -> anyhow::Result<ModuleCache> {
++        // Return an opaque placeholder so plugin-module construction succeeds;
++        // the failure is deferred to `init`, where a plugin would actually run.
++        Ok(ModuleCache(Box::new(())))
++    }
++
++    fn init(
++        &self,
++        _name: &str,
++        _imports: Vec<(String, Func)>,
++        _envs: Vec<(String, String)>,
++        _module: Module,
++    ) -> anyhow::Result<Box<dyn Instance>> {
++        anyhow::bail!("SWC wasm transform plugins are not supported on wasm host targets")
++    }
++
++    fn clone_cache(&self, _cache: &ModuleCache) -> Option<ModuleCache> {
++        Some(ModuleCache(Box::new(())))
++    }
++}
+-- 
+2.50.1 (Apple Git-155)
+

@@ -1,0 +1,247 @@
+From 328cbea93a3eee0bf47f3563a27a14f4734c000b Mon Sep 17 00:00:00 2001
+From: michaelkremenetsky
+ <28833521+michaelkremenetsky@users.noreply.github.com>
+Date: Tue, 4 Aug 2026 10:28:50 -0700
+Subject: [PATCH 18/20] next: build non-inline const rcstr! statics at runtime
+ (LazyLock) on wasm
+
+A non-inline (>7 char) rcstr! literal can't be a `const RcStr` on 16/32-bit
+targets (wasm32): turbo-rcstr's tagged value stores the interned static's
+pointer as an integer, and const-eval rejects pointer-to-integer casts
+("unable to turn pointer into integer"). Convert those module-level constants
+to runtime `static X: LazyLock<RcStr>` and deref at the use sites.
+
+Covers SOURCE_URL_PROTOCOL (turbopack-core) and its downstream uses
+(turbopack-css, next-api, next-napi-bindings), USER_AGENT_FOR_GOOGLE_FONTS and
+GOOGLE_FONTS_INTERNAL_PREFIX (next-core), and the babel loader/react-compiler
+constants. PROJECT_FILESYSTEM_NAME stays a const (its "project" literal is
+inline, so it const-evals). LazyLock is unconditional (not cfg'd on wasm) so
+the change is target-agnostic and native builds are unaffected.
+---
+ crates/next-api/src/analyze.rs                |  2 +-
+ crates/next-core/src/next_font/google/mod.rs  | 23 ++++++++++++-------
+ crates/next-core/src/next_import_map.rs       |  2 +-
+ .../src/next_shared/webpack_rules/babel.rs    | 22 +++++++++++-------
+ .../src/next_api/project.rs                   |  5 ++--
+ turbopack/crates/turbopack-core/src/lib.rs    |  8 ++++++-
+ .../turbopack-core/src/source_map/mod.rs      |  4 ++--
+ turbopack/crates/turbopack-css/src/process.rs |  2 +-
+ 8 files changed, 44 insertions(+), 24 deletions(-)
+
+diff --git a/crates/next-api/src/analyze.rs b/crates/next-api/src/analyze.rs
+index a9a6c03a..d347fcc1 100644
+--- a/crates/next-api/src/analyze.rs
++++ b/crates/next-api/src/analyze.rs
+@@ -410,7 +410,7 @@ pub async fn analyze_output_assets(
+ 
+     let mut builder = AnalyzeDataBuilder::new();
+ 
+-    let prefix = format!("{SOURCE_URL_PROTOCOL}///");
++    let prefix = format!("{}///", *SOURCE_URL_PROTOCOL);
+ 
+     // Process the output assets and extract chunk parts.
+     // Also creates sources for the chunk parts.
+diff --git a/crates/next-core/src/next_font/google/mod.rs b/crates/next-core/src/next_font/google/mod.rs
+index 77d843f0..83a9a063 100644
+--- a/crates/next-core/src/next_font/google/mod.rs
++++ b/crates/next-core/src/next_font/google/mod.rs
+@@ -68,15 +68,22 @@ pub const GOOGLE_FONTS_STYLESHEET_URL: &str = "https://fonts.googleapis.com/css2
+ // Always sending this user agent ensures consistent results from Google Fonts.
+ // Google Fonts will vary responses based on user agent, e.g. only returning
+ // references to certain font types for certain browsers.
+-pub const USER_AGENT_FOR_GOOGLE_FONTS: RcStr = rcstr!(
+-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) \
+-     Chrome/104.0.0.0 Safari/537.36"
+-);
++// `const RcStr` from a non-inline literal doesn't const-eval on 16/32-bit
++// targets (wasm32); use a runtime `LazyLock` instead.
++pub static USER_AGENT_FOR_GOOGLE_FONTS: LazyLock<RcStr> = LazyLock::new(|| {
++    rcstr!(
++        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) \
++         Chrome/104.0.0.0 Safari/537.36"
++    )
++});
+ 
+ /// The google fonts plugin downloads fonts locally and transforms the url in the css into a
+ /// specific format that is then intercepted later. This is the prefix we use for the new url.
+-pub const GOOGLE_FONTS_INTERNAL_PREFIX: RcStr =
+-    rcstr!("@vercel/turbopack-next/internal/font/google/font");
++// A non-inline (>7 char) `rcstr!` literal can't be a `const RcStr` on 16/32-bit
++// targets (wasm32): `from_static` stores the static's pointer as an integer,
++// which const-eval forbids. Use a runtime `LazyLock`; callers deref it.
++pub static GOOGLE_FONTS_INTERNAL_PREFIX: LazyLock<RcStr> =
++    LazyLock::new(|| rcstr!("@vercel/turbopack-next/internal/font/google/font"));
+ 
+ #[turbo_tasks::value(transparent)]
+ #[derive(Deserialize)]
+@@ -489,7 +496,7 @@ async fn update_google_stylesheet(
+ 
+         stylesheet = stylesheet.replace(
+             &font_url,
+-            &format!("{GOOGLE_FONTS_INTERNAL_PREFIX}?{query_str}"),
++            &format!("{}?{query_str}", *GOOGLE_FONTS_INTERNAL_PREFIX),
+         )
+     }
+ 
+@@ -665,7 +672,7 @@ async fn fetch_from_google_fonts(
+     virtual_path: FileSystemPath,
+ ) -> Result<Option<Vc<HttpResponseBody>>> {
+     let result = fetch_client
+-        .fetch(url, Some(USER_AGENT_FOR_GOOGLE_FONTS))
++        .fetch(url, Some((*USER_AGENT_FOR_GOOGLE_FONTS).clone()))
+         .await?;
+ 
+     Ok(match *result {
+diff --git a/crates/next-core/src/next_import_map.rs b/crates/next-core/src/next_import_map.rs
+index e4b08d0a..9b94370d 100644
+--- a/crates/next-core/src/next_import_map.rs
++++ b/crates/next-core/src/next_import_map.rs
+@@ -1125,7 +1125,7 @@ async fn insert_next_shared_aliases(
+     );
+ 
+     import_map.insert_alias(
+-        AliasPattern::exact(GOOGLE_FONTS_INTERNAL_PREFIX),
++        AliasPattern::exact((*GOOGLE_FONTS_INTERNAL_PREFIX).clone()),
+         ImportMapping::Dynamic(ResolvedVc::upcast(
+             NextFontGoogleFontFileReplacer::new(project_path.clone(), fetch_client)
+                 .to_resolved()
+diff --git a/crates/next-core/src/next_shared/webpack_rules/babel.rs b/crates/next-core/src/next_shared/webpack_rules/babel.rs
+index a1f22b46..17bd0444 100644
+--- a/crates/next-core/src/next_shared/webpack_rules/babel.rs
++++ b/crates/next-core/src/next_shared/webpack_rules/babel.rs
+@@ -45,11 +45,15 @@ static BABEL_LOADER_RE: LazyLock<Regex> =
+ 
+ /// The forked version of babel-loader that we should use for automatic configuration. This version
+ /// is always available, as it's installed as part of next.js.
+-const NEXT_JS_BABEL_LOADER: RcStr = rcstr!("next/dist/build/babel/loader");
++// `const RcStr` from a non-inline literal doesn't const-eval on 16/32-bit
++// targets (wasm32); use runtime `LazyLock`s instead.
++static NEXT_JS_BABEL_LOADER: LazyLock<RcStr> =
++    LazyLock::new(|| rcstr!("next/dist/build/babel/loader"));
+ 
+-const BABEL_PLUGIN_REACT_COMPILER: RcStr = rcstr!("babel-plugin-react-compiler");
+-const BABEL_PLUGIN_REACT_COMPILER_PACKAGE_JSON: RcStr =
+-    rcstr!("babel-plugin-react-compiler/package.json");
++static BABEL_PLUGIN_REACT_COMPILER: LazyLock<RcStr> =
++    LazyLock::new(|| rcstr!("babel-plugin-react-compiler"));
++static BABEL_PLUGIN_REACT_COMPILER_PACKAGE_JSON: LazyLock<RcStr> =
++    LazyLock::new(|| rcstr!("babel-plugin-react-compiler/package.json"));
+ 
+ /// Detect manually-configured babel loaders. This is used to generate a warning, suggesting using
+ /// the built-in babel support.
+@@ -238,7 +242,7 @@ pub async fn get_babel_loader_rules(
+         rcstr!("*.{js,jsx,ts,tsx,cjs,mjs,mts,cts}"),
+         LoaderRuleItem {
+             loaders: ResolvedVc::cell(vec![WebpackLoaderItem {
+-                loader: NEXT_JS_BABEL_LOADER,
++                loader: (*NEXT_JS_BABEL_LOADER).clone(),
+                 options: loader_options,
+             }]),
+             rename_as: Some(rcstr!("*")),
+@@ -335,12 +339,14 @@ pub async fn resolve_babel_plugin_react_compiler(
+     let babel_plugin_result = resolve(
+         next_package.clone(),
+         ReferenceType::CommonJs(CommonJsReferenceSubType::Undefined),
+-        Request::parse(Pattern::Constant(BABEL_PLUGIN_REACT_COMPILER_PACKAGE_JSON)),
++        Request::parse(Pattern::Constant(
++            (*BABEL_PLUGIN_REACT_COMPILER_PACKAGE_JSON).clone(),
++        )),
+         node_cjs_resolve_options(project_path.root().owned().await?),
+     );
+     let Some(source) = babel_plugin_result.await?.first_source() else {
+         BabelPluginReactCompilerResolutionIssue {
+-            failed_resolution: BABEL_PLUGIN_REACT_COMPILER,
++            failed_resolution: (*BABEL_PLUGIN_REACT_COMPILER).clone(),
+             config_file_path: next_config
+                 .config_file_path(project_path.clone())
+                 .owned()
+@@ -398,7 +404,7 @@ impl Issue for BabelPluginReactCompilerResolutionIssue {
+             )),
+             StyledString::Code(rcstr!("next")),
+             StyledString::Text(rcstr!(" package. Is ")),
+-            StyledString::Code(BABEL_PLUGIN_REACT_COMPILER),
++            StyledString::Code((*BABEL_PLUGIN_REACT_COMPILER).clone()),
+             StyledString::Text(rcstr!(" installed in your ")),
+             StyledString::Code(rcstr!("node_modules")),
+             StyledString::Text(rcstr!(" directory?")),
+diff --git a/crates/next-napi-bindings/src/next_api/project.rs b/crates/next-napi-bindings/src/next_api/project.rs
+index 6750235b..9e17b57b 100644
+--- a/crates/next-napi-bindings/src/next_api/project.rs
++++ b/crates/next-napi-bindings/src/next_api/project.rs
+@@ -99,9 +99,10 @@ use crate::{
+ /// Used by [`benchmark_file_io`]. This is a noisy benchmark, so set the
+ /// threshold high.
+ const SLOW_FILESYSTEM_THRESHOLD: Duration = Duration::from_millis(200);
+-static SOURCE_MAP_PREFIX: LazyLock<String> = LazyLock::new(|| format!("{SOURCE_URL_PROTOCOL}///"));
++static SOURCE_MAP_PREFIX: LazyLock<String> =
++    LazyLock::new(|| format!("{}///", *SOURCE_URL_PROTOCOL));
+ static SOURCE_MAP_PREFIX_PROJECT: LazyLock<String> =
+-    LazyLock::new(|| format!("{SOURCE_URL_PROTOCOL}///[{PROJECT_FILESYSTEM_NAME}]/"));
++    LazyLock::new(|| format!("{}///[{PROJECT_FILESYSTEM_NAME}]/", *SOURCE_URL_PROTOCOL));
+ 
+ #[napi(object)]
+ #[derive(Clone, Debug)]
+diff --git a/turbopack/crates/turbopack-core/src/lib.rs b/turbopack/crates/turbopack-core/src/lib.rs
+index fa924a88..c13d6195 100644
+--- a/turbopack/crates/turbopack-core/src/lib.rs
++++ b/turbopack/crates/turbopack-core/src/lib.rs
+@@ -5,6 +5,8 @@
+ #![feature(map_try_insert)]
+ #![feature(hash_set_entry)]
+ 
++use std::sync::LazyLock;
++
+ use turbo_rcstr::{RcStr, rcstr};
+ 
+ pub mod asset;
+@@ -59,7 +61,11 @@ pub mod _layers {}
+ pub const PROJECT_FILESYSTEM_NAME_STR: &str = "project";
+ pub const PROJECT_FILESYSTEM_NAME: RcStr = rcstr!(PROJECT_FILESYSTEM_NAME_STR);
+ pub const SOURCE_URL_PROTOCOL_STR: &str = "turbopack:";
+-pub const SOURCE_URL_PROTOCOL: RcStr = rcstr!(SOURCE_URL_PROTOCOL_STR);
++// A `const RcStr` from a non-inline literal doesn't const-eval on 16/32-bit
++// targets (wasm32): the tagged value stores the static's pointer as an integer,
++// which const-eval forbids. Use a runtime `LazyLock` instead; callers deref it.
++pub static SOURCE_URL_PROTOCOL: LazyLock<RcStr> =
++    LazyLock::new(|| rcstr!(SOURCE_URL_PROTOCOL_STR));
+ 
+ #[doc(hidden)]
+ pub mod __private {
+diff --git a/turbopack/crates/turbopack-core/src/source_map/mod.rs b/turbopack/crates/turbopack-core/src/source_map/mod.rs
+index 7ed915ad..082ea738 100644
+--- a/turbopack/crates/turbopack-core/src/source_map/mod.rs
++++ b/turbopack/crates/turbopack-core/src/source_map/mod.rs
+@@ -386,7 +386,7 @@ impl SourceMap {
+             Ok(
+                 if let Some(path) = origin.parent().try_join(&source_request) {
+                     let path_str = path.to_string_ref().await?;
+-                    let source = format!("{SOURCE_URL_PROTOCOL}///{path_str}");
++                    let source = format!("{}///{path_str}", *SOURCE_URL_PROTOCOL);
+                     let source_content = if let Some(source_content) = source_content {
+                         source_content
+                     } else if let FileContent::Content(file) = &*path.read().await? {
+@@ -404,7 +404,7 @@ impl SourceMap {
+                         .replace_all(&source_request, |s: &regex::Captures<'_>| {
+                             s[0].replace('.', "_")
+                         });
+-                    let source = format!("{SOURCE_URL_PROTOCOL}///{origin_str}/{source}");
++                    let source = format!("{}///{origin_str}/{source}", *SOURCE_URL_PROTOCOL);
+                     let source_content = source_content.unwrap_or_else(|| {
+                         format!(
+                             "unable to access {source_request} in {origin_str} (it's leaving the \
+diff --git a/turbopack/crates/turbopack-css/src/process.rs b/turbopack/crates/turbopack-css/src/process.rs
+index a26597fb..715707b7 100644
+--- a/turbopack/crates/turbopack-css/src/process.rs
++++ b/turbopack/crates/turbopack-css/src/process.rs
+@@ -736,7 +736,7 @@ fn generate_css_source_map(
+     let mut builder = SourceMapBuilder::new(None);
+ 
+     for src in source_map.get_sources() {
+-        builder.add_source(format!("{SOURCE_URL_PROTOCOL}///{src}").into());
++        builder.add_source(format!("{}///{src}", *SOURCE_URL_PROTOCOL).into());
+     }
+ 
+     for (idx, content) in source_map.get_sources_content().iter().enumerate() {
+-- 
+2.50.1 (Apple Git-155)
+

@@ -1,0 +1,81 @@
+From 81688c5b5a28410265008b0b18c4cfbcc7f669c9 Mon Sep 17 00:00:00 2001
+From: turbopack-wasi build <build@turbopack-wasi.invalid>
+Date: Tue, 4 Aug 2026 12:42:22 -0700
+Subject: [PATCH 20/20] turbo-tasks-fetch: update the wasm fetch client for the
+ 16.3.0 API
+
+16.3.0 replaced the free `turbo_tasks::mark_session_dependent()` call with a
+`session_dependent` flag on `#[turbo_tasks::function]` (matching the native
+client), and gave FetchClientConfig timeout/retry fields. Mark the wasm
+`fetch` function `session_dependent` and mirror the native config fields
+(min_cache_control, connect_timeout, timeout, max_retries) so the shared
+construction site (next_config::fetch_client) compiles. The wasm path bridges
+to the host's HTTP client, so those fields are advisory only there.
+---
+ .../turbo-tasks-fetch/src/client_wasm.rs      | 35 +++++++++++++++----
+ 1 file changed, 28 insertions(+), 7 deletions(-)
+
+diff --git a/turbopack/crates/turbo-tasks-fetch/src/client_wasm.rs b/turbopack/crates/turbo-tasks-fetch/src/client_wasm.rs
+index cb266e44..15815e93 100644
+--- a/turbopack/crates/turbo-tasks-fetch/src/client_wasm.rs
++++ b/turbopack/crates/turbo-tasks-fetch/src/client_wasm.rs
+@@ -1,8 +1,8 @@
+-use std::{future::Future, pin::Pin, sync::OnceLock};
++use std::{future::Future, pin::Pin, sync::OnceLock, time::Duration};
+ 
+ use anyhow::Result;
+ use turbo_rcstr::RcStr;
+-use turbo_tasks::{ResolvedVc, Vc, mark_session_dependent};
++use turbo_tasks::{ResolvedVc, Vc};
+ use turbopack_core::issue::StyledString;
+ 
+ use crate::{FetchError, FetchErrorKind, FetchResult, HttpResponse, HttpResponseBody};
+@@ -37,19 +37,40 @@ pub fn set_wasm_fetch_bridge(bridge: WasmFetchBridge) -> bool {
+ /// [`WasmFetchBridge`]; without one, every fetch resolves to a `FetchResult`
+ /// error, which surfaces as an issue rather than a build failure.
+ #[turbo_tasks::value(shared)]
+-#[derive(Hash, Default)]
+-pub struct FetchClientConfig {}
++#[derive(Hash)]
++pub struct FetchClientConfig {
++    // These mirror the native (reqwest) `FetchClientConfig` so shared
++    // construction sites (e.g. `next_config::fetch_client`) compile on both
++    // targets. The wasm path delegates to the host's HTTP client, which applies
++    // its own timeouts/retries, so on wasm these are advisory only.
++    pub min_cache_control: Duration,
++    pub connect_timeout: Duration,
++    pub timeout: Duration,
++    pub max_retries: u32,
++}
++
++impl Default for FetchClientConfig {
++    fn default() -> Self {
++        Self {
++            min_cache_control: Duration::from_secs(60 * 60),
++            connect_timeout: Duration::from_secs(10),
++            timeout: Duration::from_secs(60),
++            max_retries: 0,
++        }
++    }
++}
+ 
+ #[turbo_tasks::value_impl]
+ impl FetchClientConfig {
+-    #[turbo_tasks::function(network)]
++    // `session_dependent` (a `#[turbo_tasks::function]` flag as of 16.3.0, which
++    // replaced the free `mark_session_dependent()` call) so the fetch re-runs
++    // each session rather than serving a stale cached response across restarts.
++    #[turbo_tasks::function(network, session_dependent)]
+     pub async fn fetch(
+         self: Vc<FetchClientConfig>,
+         url: RcStr,
+         user_agent: Option<RcStr>,
+     ) -> Result<Vc<FetchResult>> {
+-        mark_session_dependent();
+-
+         let Some(bridge) = WASM_FETCH_BRIDGE.get() else {
+             return Ok(Vc::cell(Err(FetchError {
+                 detail: StyledString::Text(
+-- 
+2.50.1 (Apple Git-155)
+
