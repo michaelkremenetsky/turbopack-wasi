@@ -1,8 +1,8 @@
-From 9a4a0fe9b40485a7c085cff34604f6b5fb26ad15 Mon Sep 17 00:00:00 2001
+From c8143e2521a4ae245b6f1b532023d76a05ba82da Mon Sep 17 00:00:00 2001
 From: michaelkremenetsky
  <28833521+michaelkremenetsky@users.noreply.github.com>
 Date: Thu, 16 Jul 2026 03:25:02 -0700
-Subject: [PATCH 01/14] turbopack-cli-utils: use owo-colors instead of
+Subject: [PATCH 01/11] turbopack-cli-utils: use owo-colors instead of
  crossterm for issue styling
 
 crossterm does not build on wasm32-wasip1-threads (terminal/event machinery);
@@ -14,30 +14,30 @@ dependency of this crate) covers on every platform.
  2 files changed, 4 insertions(+), 8 deletions(-)
 
 diff --git a/turbopack/crates/turbopack-cli-utils/Cargo.toml b/turbopack/crates/turbopack-cli-utils/Cargo.toml
-index 5d360426..fa479ddf 100644
+index 2cae9739..34c5d106 100644
 --- a/turbopack/crates/turbopack-cli-utils/Cargo.toml
 +++ b/turbopack/crates/turbopack-cli-utils/Cargo.toml
-@@ -17,7 +17,6 @@ workspace = true
+@@ -16,7 +16,6 @@ workspace = true
+ 
  [dependencies]
  anyhow = { workspace = true }
- async-trait = { workspace = true }
 -crossterm = "0.26.0"
  owo-colors = { workspace = true }
  rustc-hash = { workspace = true }
  serde = { workspace = true, features = ["derive"] }
 diff --git a/turbopack/crates/turbopack-cli-utils/src/issue.rs b/turbopack/crates/turbopack-cli-utils/src/issue.rs
-index 6bda4269..a58220d7 100644
+index b8ca5451..3af82dea 100644
 --- a/turbopack/crates/turbopack-cli-utils/src/issue.rs
 +++ b/turbopack/crates/turbopack-cli-utils/src/issue.rs
-@@ -9,7 +9,6 @@ use std::{
+@@ -8,7 +8,6 @@ use std::{
+ };
  
  use anyhow::Result;
- use async_trait::async_trait;
 -use crossterm::style::{StyledContent, Stylize};
  use owo_colors::{OwoColorize as _, Style};
  use rustc_hash::{FxHashMap, FxHashSet};
  use turbo_rcstr::RcStr;
-@@ -558,15 +557,11 @@ fn make_relative_to_cwd<'a>(path: &'a str, project_dir: &Path, cwd: &Path) -> Co
+@@ -561,15 +560,11 @@ fn make_relative_to_cwd<'a>(path: &'a str, project_dir: &Path, cwd: &Path) -> Co
      }
  }
  
@@ -55,7 +55,7 @@ index 6bda4269..a58220d7 100644
      if shown == 0 {
          format!(
              "... [{} {label}] are hidden, run with {} to show them",
-@@ -574,6 +569,7 @@ fn show_all_message_with_shown_count(
+@@ -577,6 +572,7 @@ fn show_all_message_with_shown_count(
              "--show-all".bright_green()
          )
          .bold()
@@ -63,7 +63,7 @@ index 6bda4269..a58220d7 100644
      } else {
          format!(
              "... [{} more {label}] are hidden, run with {} to show all",
-@@ -581,6 +577,7 @@ fn show_all_message_with_shown_count(
+@@ -584,6 +580,7 @@ fn show_all_message_with_shown_count(
              "--show-all".bright_green()
          )
          .bold()

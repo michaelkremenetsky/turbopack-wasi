@@ -1,8 +1,8 @@
-From b0d1f1d680a2ca28f0aff35bba57c9311da921ad Mon Sep 17 00:00:00 2001
+From a279c56579683b391620bc340c16eb904f5e844d Mon Sep 17 00:00:00 2001
 From: turbopack-wasi build <build@turbopack-wasi.invalid>
 Date: Wed, 22 Jul 2026 02:06:56 -0700
-Subject: [PATCH 11/14] next-napi-bindings: hold the dist-dir lockfile unlocked
- on wasi
+Subject: [PATCH] next-napi-bindings: hold the dist-dir lockfile unlocked on
+ wasi
 
 WASI (p1) has no file-locking syscall: std's File::try_lock always fails
 with Unsupported on wasm32-wasi, so lockfile_try_acquire_sync errored and

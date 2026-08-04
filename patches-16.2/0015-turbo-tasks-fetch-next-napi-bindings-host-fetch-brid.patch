@@ -1,8 +1,8 @@
-From 473d5948b7d5b5f47c34dda7566b7b42d97560cd Mon Sep 17 00:00:00 2001
+From 30d15f420806aaf273942b2ec3d0343d1147ee2e Mon Sep 17 00:00:00 2001
 From: michaelkremenetsky
  <28833521+michaelkremenetsky@users.noreply.github.com>
 Date: Wed, 22 Jul 2026 04:39:26 -0700
-Subject: [PATCH 14/14] turbo-tasks-fetch, next-napi-bindings: host fetch
+Subject: [PATCH 15/15] turbo-tasks-fetch, next-napi-bindings: host fetch
  bridge on wasm
 
 reqwest does not build on wasm targets, so fetches (next/font's Google
@@ -22,10 +22,10 @@ requesting route, same as a network error on native.
  4 files changed, 112 insertions(+), 9 deletions(-)
 
 diff --git a/crates/next-napi-bindings/Cargo.toml b/crates/next-napi-bindings/Cargo.toml
-index a773bf52..5e75697a 100644
+index e25a7d33..b294fe3c 100644
 --- a/crates/next-napi-bindings/Cargo.toml
 +++ b/crates/next-napi-bindings/Cargo.toml
-@@ -132,6 +132,8 @@ parking_lot_core = { version = "0.9.12", features = ["nightly"] }
+@@ -150,6 +150,8 @@ parking_lot_core = { version = "0.9.12", features = ["nightly"] }
  turbo-rcstr = { workspace = true, features = ["napi"] }
  turbo-tasks = { workspace = true }
  turbo-tasks-backend = { workspace = true }
@@ -35,7 +35,7 @@ index a773bf52..5e75697a 100644
  turbo-unix-path = { workspace = true }
  next-api = { workspace = true, default-features = false, features = ["worker_pool"] }
 diff --git a/crates/next-napi-bindings/src/lib.rs b/crates/next-napi-bindings/src/lib.rs
-index a88d239d..e95df2d6 100644
+index 90943099..3e45dc56 100644
 --- a/crates/next-napi-bindings/src/lib.rs
 +++ b/crates/next-napi-bindings/src/lib.rs
 @@ -128,6 +128,55 @@ pub fn init_turbopack_wasi_runtime(_worker_threads: Option<u32>) -> napi::Result

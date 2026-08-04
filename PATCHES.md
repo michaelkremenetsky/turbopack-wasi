@@ -2,8 +2,9 @@
 
 ## What the patches do
 
-There are three series, picked by tag in `scripts/build.sh`: `patches/` for
-16.2+, `patches-16.0/` for 16.0.0-16.1.0, `patches-16.1/` for 16.1.1-16.1.7.
+There are four series, picked by tag in `scripts/build.sh`: `patches/` for
+16.3+, `patches-16.2/` for 16.2.x, `patches-16.0/` for 16.0.0-16.1.0,
+`patches-16.1/` for 16.1.1-16.1.7.
 The older tags predate the `worker_pool` backend and the `crates/napi` ->
 `crates/next-napi-bindings` rename, so they get rebased variants plus a
 turbopack-node commit that makes the child-process pool host-bridged: the
@@ -20,7 +21,22 @@ the old stubs did. `loader.cjs` registers the bridge whenever the binding
 exports it, so pre-16.2 postcss/tailwind/webpack-loader evaluation works
 wherever the loader runs.
 
-The 16.2 series, in order:
+16.3.0 forced the 16.2/16.3 split. It moved `DiskFileSystem` out of
+`turbo-tasks-fs/src/lib.rs` into a new `disk.rs` (the symlink patch, #5, follows
+it there), migrated the workspace from `once_cell::Lazy` to
+`std::sync::LazyLock` (the temp_dir and parallelism statics, #10, change
+constructor), and routes worker-count through the new `turbo_tasks::parallel`
+module. None of that applies to a 16.2.x tree, and npm versions are immutable,
+so `patches-16.2/` is frozen to keep the already-published 16.2.x builds
+reproducible while `patches/` moves forward. The one 16.2.x patch not carried
+into `patches/` is the notify watcher `follow_symlinks` fix (#16): 16.3.0 took
+it upstream verbatim, so it's already in the tree.
+
+The series below is the same set for both `patches/` and `patches-16.2/`; only
+the anchor locations and the `Lazy` -> `LazyLock` constructors differ. Patch
+#16 exists only in `patches-16.2/` (and the older series).
+
+The series, in order:
 
 | # | patch | what / why |
 |---|-------|------------|

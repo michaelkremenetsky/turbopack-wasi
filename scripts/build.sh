@@ -29,9 +29,14 @@ fi
 # 16.0.x/16.1.x predate the worker_pool backend and the crates/napi rename;
 # they carry a rebased series with a host-bridged child-process pool (the
 # loader provides child_process/net, see PATCHES.md).
+# 16.3.0 refactored DiskFileSystem into turbo-tasks-fs/src/disk.rs and migrated
+# once_cell::Lazy -> std::sync::LazyLock, so the 16.2.x series is frozen in
+# patches-16.2 (keeping those already-published builds reproducible) and
+# patches/ carries the 16.3+ variants.
 case "$TAG" in
   v16.0.*|v16.1.0) SERIES="$ROOT/patches-16.0" ;;
   v16.1.*) SERIES="$ROOT/patches-16.1" ;;
+  v16.2.*) SERIES="$ROOT/patches-16.2" ;;
   *) SERIES="$ROOT/patches" ;;
 esac
 git -C "$VENDOR" switch -C "wasi-port-$TAG"

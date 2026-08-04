@@ -1,8 +1,8 @@
-From d8bc9a77a0149ad52f858e93364cfe76a84fa867 Mon Sep 17 00:00:00 2001
+From 33528bc6e0ad28e21512d05afb15494d3569750f Mon Sep 17 00:00:00 2001
 From: michaelkremenetsky
  <28833521+michaelkremenetsky@users.noreply.github.com>
 Date: Thu, 16 Jul 2026 03:37:10 -0700
-Subject: [PATCH 08/14] next-napi-bindings: enable turbopack and next-api on
+Subject: [PATCH 08/11] next-napi-bindings: enable turbopack and next-api on
  wasm32-wasip1-threads
 
 Compile the full turbopack/next-api stack for the wasi napi build:
@@ -15,17 +15,19 @@ Compile the full turbopack/next-api stack for the wasi napi build:
   wasm build bitrot in mdx.rs)
 - silence wasm-only unused warnings in exit.rs / static_sorted_file.rs
 ---
+ Cargo.lock                                    | 19 +---------------
  crates/next-napi-bindings/Cargo.toml          | 22 +++++++++++++++----
  crates/next-napi-bindings/src/lib.rs          |  2 --
  .../src/next_api/project.rs                   | 19 ++++++++++------
+ .../src/static_sorted_file.rs                 |  3 ++-
  .../crates/turbopack-trace-utils/src/exit.rs  |  2 ++
- 4 files changed, 32 insertions(+), 13 deletions(-)
+ 6 files changed, 35 insertions(+), 32 deletions(-)
 
 diff --git a/crates/next-napi-bindings/Cargo.toml b/crates/next-napi-bindings/Cargo.toml
-index 5237da8b..e3dd89b5 100644
+index 600f1bf5..ae0fe061 100644
 --- a/crates/next-napi-bindings/Cargo.toml
 +++ b/crates/next-napi-bindings/Cargo.toml
-@@ -97,9 +97,9 @@ turbo-tasks = { workspace = true }
+@@ -114,9 +114,9 @@ turbo-tasks = { workspace = true }
  turbo-tasks-backend = { workspace = true }
  turbo-tasks-fs = { workspace = true }
  turbo-unix-path = { workspace = true }
@@ -38,7 +40,7 @@ index 5237da8b..e3dd89b5 100644
  
  mdxjs = { workspace = true, features = ["serializable"] }
  
-@@ -121,10 +121,24 @@ windows-sys = "0.60"
+@@ -139,10 +139,24 @@ windows-sys = "0.60"
  getrandom = { version = "0.2.9", default-features = false, features = ["js"] }
  iana-time-zone = { version = "*", features = ["fallback"] }
  
@@ -65,7 +67,7 @@ index 5237da8b..e3dd89b5 100644
  [target.wasm32-wasip1-threads.dependencies]
  # this requires tokio_unstable currently.
 diff --git a/crates/next-napi-bindings/src/lib.rs b/crates/next-napi-bindings/src/lib.rs
-index 6282eb54..f1683a91 100644
+index 66a88488..a9e5fc01 100644
 --- a/crates/next-napi-bindings/src/lib.rs
 +++ b/crates/next-napi-bindings/src/lib.rs
 @@ -48,7 +48,6 @@ pub mod css;
@@ -85,13 +87,13 @@ index 6282eb54..f1683a91 100644
  pub mod util;
  
 diff --git a/crates/next-napi-bindings/src/next_api/project.rs b/crates/next-napi-bindings/src/next_api/project.rs
-index 347842e7..6750235b 100644
+index 809bf16a..add153f3 100644
 --- a/crates/next-napi-bindings/src/next_api/project.rs
 +++ b/crates/next-napi-bindings/src/next_api/project.rs
-@@ -4,9 +4,10 @@ use std::{
+@@ -3,9 +3,10 @@ use std::{
      io::Write,
      path::{Path, PathBuf},
-     sync::{Arc, LazyLock},
+     sync::Arc,
 -    thread,
      time::Duration,
  };
@@ -100,7 +102,7 @@ index 347842e7..6750235b 100644
  
  use anyhow::{Context, Result, anyhow, bail};
  use bincode::{Decode, Encode};
-@@ -559,12 +560,16 @@ pub fn project_new(
+@@ -519,12 +520,16 @@ pub fn project_new(
                  .unwrap();
          });
  
@@ -123,6 +125,20 @@ index 347842e7..6750235b 100644
          }
  
          subscriber.init();
+diff --git a/turbopack/crates/turbo-persistence/src/static_sorted_file.rs b/turbopack/crates/turbo-persistence/src/static_sorted_file.rs
+index 9fa5ad61..cffa7f78 100644
+--- a/turbopack/crates/turbo-persistence/src/static_sorted_file.rs
++++ b/turbopack/crates/turbo-persistence/src/static_sorted_file.rs
+@@ -180,7 +180,8 @@ impl StaticSortedFile {
+     fn open_internal(
+         path: PathBuf,
+         meta: StaticSortedFileMetaData,
+-        sequential: bool,
++        // only used for madvise on unix; wasm has no memory-mapping advice
++        #[cfg_attr(target_family = "wasm", allow(unused_variables))] sequential: bool,
+     ) -> Result<Self> {
+         let file = File::open(&path)
+             .with_context(|| format!("Failed to open SST file {}", path.display()))?;
 diff --git a/turbopack/crates/turbopack-trace-utils/src/exit.rs b/turbopack/crates/turbopack-trace-utils/src/exit.rs
 index ff514705..e53f3d84 100644
 --- a/turbopack/crates/turbopack-trace-utils/src/exit.rs

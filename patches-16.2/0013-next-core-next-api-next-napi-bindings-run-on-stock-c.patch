@@ -1,8 +1,8 @@
-From dac658ad723f0bb441637711356d2ded0d00e538 Mon Sep 17 00:00:00 2001
+From 192061bd4868bf7080fc0b5421c2df21d948c720 Mon Sep 17 00:00:00 2001
 From: turbopack-wasi build <build@turbopack-wasi.invalid>
 Date: Wed, 22 Jul 2026 02:48:34 -0700
-Subject: [PATCH 12/14] next-core/next-api/next-napi-bindings: run on stock
- configs when the process pool is compiled out
+Subject: [PATCH] next-core/next-api/next-napi-bindings: run on stock configs
+ when the process pool is compiled out
 
 Two config values otherwise require every project to be edited before the
 wasi build can run:
@@ -22,10 +22,10 @@ wasi build can run:
  3 files changed, 33 insertions(+), 3 deletions(-)
 
 diff --git a/crates/next-api/src/project.rs b/crates/next-api/src/project.rs
-index d3c73442..a4eea2fe 100644
+index 243b7aad..1e6f8ad7 100644
 --- a/crates/next-api/src/project.rs
 +++ b/crates/next-api/src/project.rs
-@@ -1256,6 +1256,10 @@ impl Project {
+@@ -1241,6 +1241,10 @@ impl Project {
              TurbopackPluginRuntimeStrategy::WorkerThreads => worker_threads_backend(),
              #[cfg(feature = "process_pool")]
              TurbopackPluginRuntimeStrategy::ChildProcesses => child_process_backend(),
@@ -37,10 +37,10 @@ index d3c73442..a4eea2fe 100644
  
          let node_execution_chunking_context = Vc::upcast(
 diff --git a/crates/next-core/src/next_config.rs b/crates/next-core/src/next_config.rs
-index 14bb4f4c..1fc7675e 100644
+index aa728701..de9d701f 100644
 --- a/crates/next-core/src/next_config.rs
 +++ b/crates/next-core/src/next_config.rs
-@@ -925,6 +925,14 @@ pub enum TurbopackPluginRuntimeStrategy {
+@@ -928,6 +928,14 @@ pub enum TurbopackPluginRuntimeStrategy {
      WorkerThreads,
      #[cfg(feature = "process_pool")]
      ChildProcesses,
@@ -55,7 +55,7 @@ index 14bb4f4c..1fc7675e 100644
  }
  
  #[derive(
-@@ -2510,10 +2518,20 @@ impl NextConfig {
+@@ -2091,10 +2099,20 @@ impl NextConfig {
          #[cfg(all(feature = "worker_pool", not(feature = "process_pool")))]
          let default = TurbopackPluginRuntimeStrategy::WorkerThreads;
  
@@ -80,12 +80,12 @@ index 14bb4f4c..1fc7675e 100644
  
      #[turbo_tasks::function]
 diff --git a/crates/next-napi-bindings/src/next_api/turbopack_ctx.rs b/crates/next-napi-bindings/src/next_api/turbopack_ctx.rs
-index 11b0fb68..3f31986a 100644
+index df15d6b6..0d30e21b 100644
 --- a/crates/next-napi-bindings/src/next_api/turbopack_ctx.rs
 +++ b/crates/next-napi-bindings/src/next_api/turbopack_ctx.rs
-@@ -266,6 +266,14 @@ pub fn create_turbo_tasks(
-     skip_compaction: bool,
-     turbopack_memory_eviction: MemoryEvictionMode,
+@@ -216,6 +216,14 @@ pub fn create_turbo_tasks(
+     is_ci: bool,
+     is_short_session: bool,
  ) -> Result<NextTurboTasks> {
 +    // The on-disk persistence store is not functional on wasi (write-batch
 +    // concurrency assertions trip under the worker-thread pool); always run
@@ -96,8 +96,8 @@ index 11b0fb68..3f31986a 100644
 +        false
 +    };
      Ok(if persistent_caching {
-         let describe = cache_describe(next_version);
-         let version_info = git_version_info(&describe);
+         let version_info = GitVersionInfo {
+             describe: env!("VERGEN_GIT_DESCRIBE"),
 -- 
 2.50.1 (Apple Git-155)
 

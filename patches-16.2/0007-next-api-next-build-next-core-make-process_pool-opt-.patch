@@ -1,8 +1,8 @@
-From cbb6c334099baa053465c3c98e3d8bb97159cda3 Mon Sep 17 00:00:00 2001
+From d041c0562fd1fdf95033b34fbef6d7fca6f24ed1 Mon Sep 17 00:00:00 2001
 From: michaelkremenetsky
  <28833521+michaelkremenetsky@users.noreply.github.com>
 Date: Thu, 16 Jul 2026 03:37:10 -0700
-Subject: [PATCH 07/14] next-api/next-build/next-core: make process_pool
+Subject: [PATCH 07/11] next-api/next-build/next-core: make process_pool
  opt-out across the workspace
 
 process_pool spawns node child processes over TCP, neither of which exist
@@ -18,10 +18,10 @@ All native consumers keep process_pool enabled explicitly.
  4 files changed, 12 insertions(+), 7 deletions(-)
 
 diff --git a/Cargo.toml b/Cargo.toml
-index 64a6ae0e..b8315eef 100644
+index 8dc34de2..9d7f2b70 100644
 --- a/Cargo.toml
 +++ b/Cargo.toml
-@@ -156,10 +156,10 @@ opt-level = "s"
+@@ -298,10 +298,10 @@ debug = true
  
  [workspace.dependencies]
  # Workspace crates
@@ -36,10 +36,10 @@ index 64a6ae0e..b8315eef 100644
  next-taskless = { path = "crates/next-taskless" }
  
 diff --git a/crates/next-api/Cargo.toml b/crates/next-api/Cargo.toml
-index 98784035..8860f323 100644
+index e7240d1d..a7d1588e 100644
 --- a/crates/next-api/Cargo.toml
 +++ b/crates/next-api/Cargo.toml
-@@ -25,7 +25,7 @@ byteorder = { workspace = true }
+@@ -24,7 +24,7 @@ byteorder = { workspace = true }
  either = { workspace = true }
  futures = { workspace = true }
  indexmap = { workspace = true }
@@ -49,7 +49,7 @@ index 98784035..8860f323 100644
  roaring = { workspace = true }
  rustc-hash = { workspace = true }
 diff --git a/crates/next-build-test/Cargo.toml b/crates/next-build-test/Cargo.toml
-index cc80ea51..0fd49a5e 100644
+index 534e4ae5..750825e7 100644
 --- a/crates/next-build-test/Cargo.toml
 +++ b/crates/next-build-test/Cargo.toml
 @@ -12,8 +12,8 @@ workspace = true

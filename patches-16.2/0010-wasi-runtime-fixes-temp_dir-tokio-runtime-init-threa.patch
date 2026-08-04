@@ -1,8 +1,8 @@
-From e99cd532d404301389176293f07c1941827c7841 Mon Sep 17 00:00:00 2001
+From e00841ba81451f903b5f63fdca987f1194f0116f Mon Sep 17 00:00:00 2001
 From: michaelkremenetsky
  <28833521+michaelkremenetsky@users.noreply.github.com>
 Date: Thu, 16 Jul 2026 06:22:25 -0700
-Subject: [PATCH 09/14] wasi runtime fixes: temp_dir, tokio runtime init,
+Subject: [PATCH 10/11] wasi runtime fixes: temp_dir, tokio runtime init,
  thread parker, parallelism
 
 - PANIC_LOG used std::env::temp_dir(), which panics on wasi; fall back to
@@ -17,18 +17,19 @@ Subject: [PATCH 09/14] wasi runtime fixes: temp_dir, tokio runtime init,
   available_parallelism is unsupported there; honor TURBOPACK_PARALLELISM
   or default to a small pool
 ---
+ Cargo.lock                                    | 20 +++++++++----
  crates/next-napi-bindings/Cargo.toml          |  4 +++
  crates/next-napi-bindings/src/lib.rs          | 28 +++++++++++++++++++
  .../src/next_api/turbopack_ctx.rs             |  4 +++
- turbopack/crates/turbo-tasks/src/scope.rs     | 13 +++++++--
+ turbopack/crates/turbo-tasks/src/scope.rs     | 12 +++++++-
  .../crates/turbopack-trace-utils/src/exit.rs  |  6 +++-
- 5 files changed, 52 insertions(+), 3 deletions(-)
+ 6 files changed, 67 insertions(+), 7 deletions(-)
 
 diff --git a/crates/next-napi-bindings/Cargo.toml b/crates/next-napi-bindings/Cargo.toml
-index e3dd89b5..a773bf52 100644
+index ae0fe061..e25a7d33 100644
 --- a/crates/next-napi-bindings/Cargo.toml
 +++ b/crates/next-napi-bindings/Cargo.toml
-@@ -125,6 +125,10 @@ mdxjs = { workspace = true, features = ["serializable"] }
+@@ -143,6 +143,10 @@ mdxjs = { workspace = true, features = ["serializable"] }
  
  turbo-tasks-malloc = { workspace = true, default-features = false }
  
@@ -40,7 +41,7 @@ index e3dd89b5..a773bf52 100644
  turbo-tasks = { workspace = true }
  turbo-tasks-backend = { workspace = true }
 diff --git a/crates/next-napi-bindings/src/lib.rs b/crates/next-napi-bindings/src/lib.rs
-index f1683a91..776a6e15 100644
+index a9e5fc01..81cb06f2 100644
 --- a/crates/next-napi-bindings/src/lib.rs
 +++ b/crates/next-napi-bindings/src/lib.rs
 @@ -66,6 +66,34 @@ static ALLOC: turbo_tasks_malloc::TurboMalloc = turbo_tasks_malloc::TurboMalloc;
@@ -79,13 +80,13 @@ index f1683a91..776a6e15 100644
  #[napi::module_init]
  fn init() {
 diff --git a/crates/next-napi-bindings/src/next_api/turbopack_ctx.rs b/crates/next-napi-bindings/src/next_api/turbopack_ctx.rs
-index 87a6f8c3..11b0fb68 100644
+index f231e857..df15d6b6 100644
 --- a/crates/next-napi-bindings/src/next_api/turbopack_ctx.rs
 +++ b/crates/next-napi-bindings/src/next_api/turbopack_ctx.rs
-@@ -344,6 +344,10 @@ impl CompilationEvent for StartupCacheInvalidationEvent {
+@@ -295,6 +295,10 @@ impl CompilationEvent for StartupCacheInvalidationEvent {
  static LOG_THROTTLE: Mutex<Option<Instant>> = Mutex::new(None);
  static LOG_DIVIDER: &str = "---------------------------";
- static PANIC_LOG: LazyLock<PathBuf> = LazyLock::new(|| {
+ static PANIC_LOG: Lazy<PathBuf> = Lazy::new(|| {
 +    // std::env::temp_dir() panics on wasi; fall back to TMPDIR (which the host controls) or /tmp.
 +    #[cfg(target_family = "wasm")]
 +    let mut path = PathBuf::from(env::var("TMPDIR").unwrap_or_else(|_| "/tmp".to_string()));
@@ -94,16 +95,15 @@ index 87a6f8c3..11b0fb68 100644
      path.push(format!("next-panic-{:x}.log", rand::random::<u128>()));
      path
 diff --git a/turbopack/crates/turbo-tasks/src/scope.rs b/turbopack/crates/turbo-tasks/src/scope.rs
-index fab2a1f6..4213b2b7 100644
+index 9ff99a36..2ebf8f10 100644
 --- a/turbopack/crates/turbo-tasks/src/scope.rs
 +++ b/turbopack/crates/turbo-tasks/src/scope.rs
-@@ -23,8 +23,17 @@ use crate::{
+@@ -22,7 +22,17 @@ use crate::{TurboTasksApi, manager::try_turbo_tasks, turbo_tasks_scope};
  
  /// Number of worker tasks to spawn that process jobs. It's 1 less than the number of cpus as we
  /// also use the current task as worker.
--static WORKER_TASKS: LazyLock<usize> =
--    LazyLock::new(|| available_parallelism().map_or(0, |n| n.get() - 1));
-+static WORKER_TASKS: LazyLock<usize> = LazyLock::new(|| {
+-static WORKER_TASKS: Lazy<usize> = Lazy::new(|| available_parallelism().map_or(0, |n| n.get() - 1));
++static WORKER_TASKS: Lazy<usize> = Lazy::new(|| {
 +    available_parallelism().map(|n| n.get() - 1).unwrap_or_else(|_| {
 +        // std cannot detect parallelism on wasi; let the host specify it via env, defaulting to
 +        // a small pool instead of falling back to fully sequential scopes.
