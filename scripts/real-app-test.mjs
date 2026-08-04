@@ -19,6 +19,7 @@ process.on('uncaughtException', (err) => {
   process.exit(4)
 })
 const root = path.join(import.meta.dirname, '..')
+const { makeReadCustomSection } = createRequire(import.meta.url)('./wasm-link-sections.cjs')
 const nativeDir = process.env.WASI_NATIVE_DIR ?? path.join(root, 'vendor/next.js/packages/next-swc/native')
 const fixture = path.resolve(process.argv[2] ?? path.join(root, 'fixtures/hello-app'))
 // monorepos: rootPath = repo root, projectPath = app dir relative to it
@@ -88,6 +89,9 @@ const { napiModule } = await rt.instantiateNapiModule(bytes, {
       ...importObject.env,
       ...importObject.napi,
       ...importObject.emnapi,
+      // 16.3.0's scattered-collect/link-section registries live in wasm custom
+      // sections read back via this host import (see wasm-link-sections.cjs).
+      read_custom_section: makeReadCustomSection(bytes, () => globalThis.__wasiMemory),
       memory: (globalThis.__wasiMemory = new WebAssembly.Memory({
         // Start at the module's own minimum and let it grow. (On Node 22 only:
         // memory.grow on a shared memory races V8's cached size in

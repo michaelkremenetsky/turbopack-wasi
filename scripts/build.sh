@@ -86,6 +86,13 @@ node "$ROOT/sdk/node_modules/napi-cli-alpha/dist/cli.js" build \
   --output-dir packages/next-swc/native \
   --release --no-default-features
 
+# 16.3.0+ registers turbo-tasks functions/traits/values through scattered-collect
+# -> link-section, which on wasm keeps its registries in custom sections and reads
+# them back at startup via an `env.read_custom_section` host import. The napi-cli
+# loaders don't provide it (the module fails to instantiate without it), so inject
+# it into the generated node loaders and ship the helper alongside them.
+node "$ROOT/scripts/inject-read-custom-section.mjs" "$VENDOR/packages/next-swc/native"
+
 # --- collect artifacts -------------------------------------------------------
 DIST="$ROOT/dist/$TAG"
 mkdir -p "$DIST"
