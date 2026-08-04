@@ -1,0 +1,72 @@
+From 0b85cee2b4ac6b6577652e6fff14bc67000cedc1 Mon Sep 17 00:00:00 2001
+From: michaelkremenetsky
+ <28833521+michaelkremenetsky@users.noreply.github.com>
+Date: Tue, 4 Aug 2026 10:09:02 -0700
+Subject: [PATCH] turbo-rcstr: build rcstr! statics at runtime on 16/32-bit
+ targets
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+rcstr! for non-inline strings emits `const RCSTR: RcStr = from_static(&S)`.
+On 16/32-bit targets (wasm32) turbo-rcstr's tagged value stores the pointer in
+a wider integer via transmute(ptr) -> usize, which const-eval rejects (E0080
+"unable to turn pointer into integer") — so every non-inline rcstr! call fails
+to compile. The proc-macro runs host-side and can't see the target width, so
+emit target_pointer_width-gated code: keep the compile-time const on 64-bit,
+construct the RcStr at runtime on 16/32-bit. The storage stays a static.
+---
+ .../crates/turbo-rcstr-macros/src/lib.rs      | 22 ++++++++++++++-----
+ 1 file changed, 16 insertions(+), 6 deletions(-)
+
+diff --git a/turbopack/crates/turbo-rcstr-macros/src/lib.rs b/turbopack/crates/turbo-rcstr-macros/src/lib.rs
+index 6343e769..cd27c9a3 100644
+--- a/turbopack/crates/turbo-rcstr-macros/src/lib.rs
++++ b/turbopack/crates/turbo-rcstr-macros/src/lib.rs
+@@ -35,16 +35,27 @@ pub fn rcstr(input: TokenStream) -> TokenStream {
+     // — so cloning here lets us consume one copy in `classify_literal`
+     // while keeping the original around for the fallback path.
+     {
++        // Materialize the `RcStr` from the static storage. On 64-bit targets
++        // `from_static` const-evaluates. On 16/32-bit targets (wasm32 included)
++        // turbo-rcstr's tagged value stores the pointer in a wider integer via
++        // `transmute(ptr) -> usize`, which const-eval rejects ("unable to turn
++        // pointer into integer"), so construct the `RcStr` at runtime there.
++        // `RCSTR_STORAGE` stays a `static` in both cases.
++        const MATERIALIZE_RCSTR: &str = "{ \
++             #[cfg(not(any(target_pointer_width = \"16\", target_pointer_width = \"32\")))] \
++             { const RCSTR: ::turbo_rcstr::RcStr = \
++             ::turbo_rcstr::from_static(&RCSTR_STORAGE); RCSTR } \
++             #[cfg(any(target_pointer_width = \"16\", target_pointer_width = \"32\"))] \
++             { ::turbo_rcstr::from_static(&RCSTR_STORAGE) } }";
+         let source = if let Some((lit, len)) = classify_literal(input.clone()) {
+             if len <= MAX_INLINE_LEN {
+                 format!("::turbo_rcstr::inline_atom({lit}).unwrap()")
+             } else {
+                 format!(
+                     "{{ static RCSTR_STORAGE: ::turbo_rcstr::StaticPrehashedString = \
+-                     ::turbo_rcstr::make_const_prehashed_string({lit}); const RCSTR: \
+-                     ::turbo_rcstr::RcStr = ::turbo_rcstr::from_static(&RCSTR_STORAGE); \
++                     ::turbo_rcstr::make_const_prehashed_string({lit}); \
+                      ::turbo_rcstr::__rcstr_static_submit!(
+-                     ::turbo_rcstr::StaticRcStr(&RCSTR_STORAGE) ); RCSTR }}",
++                     ::turbo_rcstr::StaticRcStr(&RCSTR_STORAGE) ); {MATERIALIZE_RCSTR} }}",
+                 )
+             }
+         } else {
+@@ -52,10 +63,9 @@ pub fn rcstr(input: TokenStream) -> TokenStream {
+                 "{{ const TEXT: &str = {input}; if ::turbo_rcstr::is_atom_inlineable(TEXT) {{ \
+                  ::turbo_rcstr::inline_atom(TEXT).unwrap() }} else {{ static RCSTR_STORAGE: \
+                  ::turbo_rcstr::StaticPrehashedString = \
+-                 ::turbo_rcstr::make_const_prehashed_string(TEXT); const RCSTR: \
+-                 ::turbo_rcstr::RcStr = ::turbo_rcstr::from_static(&RCSTR_STORAGE); \
++                 ::turbo_rcstr::make_const_prehashed_string(TEXT); \
+                  ::turbo_rcstr::__rcstr_static_submit!(
+-                 ::turbo_rcstr::StaticRcStr(&RCSTR_STORAGE) ); RCSTR }} }}",
++                 ::turbo_rcstr::StaticRcStr(&RCSTR_STORAGE) ); {MATERIALIZE_RCSTR} }} }}",
+             )
+         };
+         TokenStream::from_str(&source).expect("emitted source parses")
+-- 
+2.50.1 (Apple Git-155)
+
