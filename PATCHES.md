@@ -26,15 +26,23 @@ wherever the loader runs.
 it there), migrated the workspace from `once_cell::Lazy` to
 `std::sync::LazyLock` (the temp_dir and parallelism statics, #10, change
 constructor), and routes worker-count through the new `turbo_tasks::parallel`
-module. None of that applies to a 16.2.x tree, and npm versions are immutable,
-so `patches-16.2/` is frozen to keep the already-published 16.2.x builds
-reproducible while `patches/` moves forward. The one 16.2.x patch not carried
-into `patches/` is the notify watcher `follow_symlinks` fix (#16): 16.3.0 took
-it upstream verbatim, so it's already in the tree.
+module, and it added a synchronous `EventListener::wait` that calls
+`event_listener`'s blocking API (compiled out on wasm). None of that applies to
+a 16.2.x tree, and npm versions are immutable, so `patches-16.2/` is frozen to
+keep the already-published 16.2.x builds reproducible while `patches/` moves
+forward.
 
-The series below is the same set for both `patches/` and `patches-16.2/`; only
-the anchor locations and the `Lazy` -> `LazyLock` constructors differ. Patch
-#16 exists only in `patches-16.2/` (and the older series).
+Patches 1-15 below are the same set in both `patches/` and `patches-16.2/`;
+only the anchor locations and the `Lazy` -> `LazyLock` constructors differ.
+The two series each carry a *different* patch #16, because the version-specific
+work landed at the boundary:
+
+- `patches-16.2/` #16 — notify watcher `follow_symlinks` fix. 16.3.0 took this
+  upstream verbatim, so it's dropped from `patches/`.
+- `patches/` #16 — `block_on` the new synchronous `EventListener::wait` on wasm
+  (`event_listener` compiles its blocking `Listener::wait` out on
+  `target_family = "wasm"`; wasm32-wasip1-threads can block, so we drive the
+  listener future instead). New in 16.3.0.
 
 The series, in order:
 

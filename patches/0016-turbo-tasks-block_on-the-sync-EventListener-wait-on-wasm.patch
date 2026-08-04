@@ -1,0 +1,50 @@
+From f459f13c3c0f199726639807d957e428e0575c4b Mon Sep 17 00:00:00 2001
+From: michaelkremenetsky
+ <28833521+michaelkremenetsky@users.noreply.github.com>
+Date: Tue, 4 Aug 2026 09:28:05 -0700
+Subject: [PATCH] turbo-tasks: block_on the sync EventListener::wait on wasm
+
+16.3.0 added a synchronous EventListener::wait (turbo-tasks backend uses it
+off the async path). It calls event_listener's Listener::wait, which the
+crate compiles out on target_family = "wasm", so the wasm build fails with
+E0599. wasm32-wasip1-threads has real threads that can block, so drive the
+listener future to completion with futures' thread-parking block_on there,
+matching the native blocking wait.
+---
+ turbopack/crates/turbo-tasks/src/event.rs | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+
+diff --git a/turbopack/crates/turbo-tasks/src/event.rs b/turbopack/crates/turbo-tasks/src/event.rs
+index 370665ec..40d1fcfc 100644
+--- a/turbopack/crates/turbo-tasks/src/event.rs
++++ b/turbopack/crates/turbo-tasks/src/event.rs
+@@ -11,6 +11,10 @@ use std::{
+     time::Duration,
+ };
+ 
++// `Listener::wait` is only used on targets where event_listener compiles its
++// blocking API in (see `EventListener::wait` below); wasm drives the future
++// with `block_on` instead.
++#[cfg(any(not(target_family = "wasm"), feature = "hanging_detection"))]
+ use event_listener::Listener as _;
+ #[cfg(feature = "hanging_detection")]
+ use tokio::time::{Timeout, timeout};
+@@ -209,7 +213,15 @@ impl EventListener {
+     /// This is the synchronous equivalent of `.await`-ing the `EventListener`.
+     /// Only valid in synchronous contexts (e.g. backend operations).
+     pub fn wait(self) {
++        // event_listener compiles its blocking `Listener::wait` out on
++        // `target_family = "wasm"` (generic wasm can't block a thread).
++        // wasm32-wasip1-threads has real threads that can, so drive the
++        // listener future to completion with a thread-parking `block_on`
++        // there — behaviourally the same synchronous wait.
++        #[cfg(not(target_family = "wasm"))]
+         self.listener.wait();
++        #[cfg(target_family = "wasm")]
++        futures::executor::block_on(self.listener);
+     }
+ }
+ 
+-- 
+2.50.1 (Apple Git-155)
+
