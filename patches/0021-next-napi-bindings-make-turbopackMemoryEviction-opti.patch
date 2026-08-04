@@ -1,0 +1,51 @@
+From a443396789e9e102be500403c9643380468e024b Mon Sep 17 00:00:00 2001
+From: turbopack-wasi build <build@turbopack-wasi.invalid>
+Date: Tue, 4 Aug 2026 13:51:30 -0700
+Subject: [PATCH] next-napi-bindings: make turbopackMemoryEviction optional in
+ NapiTurboEngineOptions
+
+Every other field of the `#[napi(object)] NapiTurboEngineOptions` is
+`Option<T>` with an `unwrap_or` default; `turbopack_memory_eviction` was the
+lone required one. next's createProject omits it whenever
+`experimental.turbopackMemoryEviction` is unset (its config default), so
+projectNew failed to deserialize the options object with
+`Missing field turbopackMemoryEviction`. Make it `Option<MemoryEvictionMode>`
+defaulting to `Off`, matching its siblings. On wasi persistent caching is
+forced off, so the eviction mode is unused there regardless.
+---
+ crates/next-napi-bindings/src/next_api/project.rs | 12 +++++++++---
+ 1 file changed, 9 insertions(+), 3 deletions(-)
+
+diff --git a/crates/next-napi-bindings/src/next_api/project.rs b/crates/next-napi-bindings/src/next_api/project.rs
+index 9e17b57b..71c18eb6 100644
+--- a/crates/next-napi-bindings/src/next_api/project.rs
++++ b/crates/next-napi-bindings/src/next_api/project.rs
+@@ -285,8 +285,12 @@ pub struct NapiTurboEngineOptions {
+     pub is_short_session: Option<bool>,
+     /// Whether to skip database compaction during shutdown.
+     pub skip_compaction: Option<bool>,
+-    /// Turbopack memory eviction mode for the persistent cache.
+-    pub turbopack_memory_eviction: MemoryEvictionMode,
++    /// Turbopack memory eviction mode for the persistent cache. Optional:
++    /// callers that don't set `experimental.turbopackMemoryEviction` (its config
++    /// default is unset) omit it, so treat a missing value as `Off` rather than
++    /// rejecting the whole options object. On wasi persistent caching is forced
++    /// off, so the eviction mode is unused there regardless.
++    pub turbopack_memory_eviction: Option<MemoryEvictionMode>,
+ }
+ 
+ impl From<NapiWatchOptions> for WatchOptions {
+@@ -582,7 +586,9 @@ pub fn project_new(
+             let is_ci = turbo_engine_options.is_ci.unwrap_or(false);
+             let is_short_session = turbo_engine_options.is_short_session.unwrap_or(false);
+             let skip_compaction = turbo_engine_options.skip_compaction.unwrap_or(false);
+-            let turbopack_memory_eviction = turbo_engine_options.turbopack_memory_eviction;
++            let turbopack_memory_eviction = turbo_engine_options
++                .turbopack_memory_eviction
++                .unwrap_or(MemoryEvictionMode::Off);
+             let turbo_tasks = create_turbo_tasks(
+                 PathBuf::from(&options.dist_dir),
+                 &options.next_version,
+-- 
+2.50.1 (Apple Git-155)
+

@@ -74,6 +74,7 @@ and the nightly bump that came with it:
 | 18 | next / turbopack | convert non-inline (`>7` char) `const RcStr = rcstr!(...)` module constants to `static LazyLock<RcStr>` (const-eval can't turn the interned static's pointer into an integer on wasm32) and deref at the use sites; inline literals like `"project"` stay `const` |
 | 19 | turbopack-ecmascript-plugins, next-napi-bindings | drop the wasmtime SWC-plugin backend on wasm. It can't run a wasm plugin inside a wasm guest and pulls in `cap-std`/`cap-primitives`/`wasi-common`, which stopped building for wasi (recent std dropped the `wasi_ext` metadata/open-options methods those crates use). Gate the dep on `cfg(not(target_family = "wasm"))` and swap `WasmtimeRuntime` for a `NoopRuntime` stub, keeping swc_core's pure-Rust plugin *host* types |
 | 20 | turbo-tasks-fetch | update the wasm fetch client for the 16.3.0 API: `session_dependent` became a `#[turbo_tasks::function]` flag (was a free `mark_session_dependent()` call), and `FetchClientConfig` grew timeout/retry fields the shared construction site now sets |
+| 21 | next-napi-bindings | make `turbopackMemoryEviction` optional in `NapiTurboEngineOptions` (default `Off`) — it was the one non-`Option` field, and next's createProject omits it when the config option is unset, so projectNew rejected the whole options object. Unused on wasi anyway (persistent caching is forced off) |
 
 About those 16MB stacks in patch 11: not optional. Wasm shadow-stack frames
 run several times larger than native and the 2MB default overflows under
