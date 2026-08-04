@@ -1,0 +1,57 @@
+From 815418f5ddb59030c15c2639a65f17c5f67ca2cc Mon Sep 17 00:00:00 2001
+From: turbopack-wasi build <build@turbopack-wasi.invalid>
+Date: Tue, 4 Aug 2026 14:12:24 -0700
+Subject: [PATCH] next-napi-bindings: resolve a relative dist dir against the
+ project dir on wasm
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+16.3.0 added an eager `create_dir_all(dist_dir)` + `canonicalize` in project_new
+(16.2.x kept dist_dir relative and let DiskFileSystem handle it). `dist_dir` is
+relative (e.g. `.next`); native next resolves it against its process cwd (the
+project dir), but wasi has no usable cwd, so `create_dir_all(".next")` fails
+with ENOENT ("failed to create dist directory"). On wasm, resolve a relative
+dist dir against the project dir (root_path + project_path) — the same location
+native's cwd produces — leaving the native path unchanged.
+---
+ .../src/next_api/project.rs                   | 21 +++++++++++++++++--
+ 1 file changed, 19 insertions(+), 2 deletions(-)
+
+diff --git a/crates/next-napi-bindings/src/next_api/project.rs b/crates/next-napi-bindings/src/next_api/project.rs
+index 71c18eb6..91cf74aa 100644
+--- a/crates/next-napi-bindings/src/next_api/project.rs
++++ b/crates/next-napi-bindings/src/next_api/project.rs
+@@ -437,10 +437,27 @@ pub fn project_new(
+         napi::Error::from_reason(PrettyPrintError(&anyhow::Error::from(e)).to_string())
+     })?;
+     // The dist dir (e.g. `.next`) may not exist yet, and `canonicalize` requires an existing path.
+-    create_dir_all(Path::new(&*options.dist_dir))
++    // Native next resolves a relative dist dir against its process cwd (the project dir); wasi has
++    // no usable cwd, so a bare `create_dir_all(".next")` fails with ENOENT there. On wasm resolve a
++    // relative dist dir against the project dir (root_path + project_path) explicitly — the same
++    // path native's cwd would produce — while leaving the native path byte-for-byte unchanged.
++    #[cfg(not(target_family = "wasm"))]
++    let dist_dir_path = Path::new(&*options.dist_dir).to_path_buf();
++    #[cfg(target_family = "wasm")]
++    let dist_dir_path = {
++        let dist = Path::new(&*options.dist_dir);
++        if dist.is_absolute() {
++            dist.to_path_buf()
++        } else {
++            Path::new(&*options.root_path)
++                .join(&*unix_to_sys(&options.project_path))
++                .join(dist)
++        }
++    };
++    create_dir_all(&dist_dir_path)
+         .with_context(|| format!("failed to create dist directory {:?}", options.dist_dir))
+         .map_err(|e| napi::Error::from_reason(PrettyPrintError(&e).to_string()))?;
+-    options.dist_dir = canonicalize_to_rcstr(Path::new(&*options.dist_dir)).map_err(|e| {
++    options.dist_dir = canonicalize_to_rcstr(&dist_dir_path).map_err(|e| {
+         napi::Error::from_reason(PrettyPrintError(&anyhow::Error::from(e)).to_string())
+     })?;
+ 
+-- 
+2.50.1 (Apple Git-155)
+
