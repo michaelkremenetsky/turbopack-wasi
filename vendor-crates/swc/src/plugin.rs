@@ -195,7 +195,11 @@ impl RustPlugins {
     #[cfg_attr(debug_assertions, tracing::instrument(level = "info", skip_all))]
     fn apply_inner(&mut self, n: Program) -> Result<Program, anyhow::Error> {
         // [TODO]: unimplemented
-        n
+        // (turbopack-wasi) upstream returns the bare `Program` here; the fn
+        // signature is `Result<Program, _>`, so it doesn't compile with
+        // `plugin` + wasm32. Plugins never run in this build (no wasmtime
+        // backend on wasm), so just pass the program through.
+        Ok(n)
     }
 }
 

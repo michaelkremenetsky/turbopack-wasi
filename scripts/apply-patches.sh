@@ -211,4 +211,36 @@ PYEOF
 
 git -C "$CHECKOUT" add Cargo.toml
 git -C "$CHECKOUT" commit -q -m "workspace: use turbopack-wasi napi fork (custom GC on wasm+atomics)" || true
+
+# 16.3.0 bumped swc to 71.0.0, whose plugin.rs has a wasm-only compile bug: the
+# `all(feature = "plugin", target_arch = "wasm32")` stub of `apply_inner`
+# returns a bare `Program` where the signature is `Result<Program, _>`. We build
+# swc with the plugin host features on (matching native) but no wasmtime backend
+# on wasm, so that stub is compiled and rejected. vendor-crates/swc is the crate
+# with the one-line fix (`Ok(n)`). Only wire it in when the tree actually pins
+# swc 71.x — older series use an swc without the bug. Scripted (not a .patch)
+# because the path is machine-specific, same as the napi fork above.
+if awk '/^name = "swc"$/{f=1;next} f&&/^version = /{print;exit}' \
+     "$CHECKOUT/Cargo.lock" 2>/dev/null | grep -q '"71\.'; then
+  python3 - "$CHECKOUT/Cargo.toml" "$ROOT/vendor-crates/swc" <<'PYEOF'
+import sys
+
+path, swc_path = sys.argv[1], sys.argv[2]
+src = open(path).read()
+
+if "vendor-crates/swc" in src:
+    print("Cargo.toml already points at the swc fork")
+    sys.exit(0)
+
+line = f'swc = {{ path = "{swc_path}" }} # turbopack-wasi: wasm plugin.rs compile fix (swc 71.0.0)\n'
+if "[patch.crates-io]" in src:
+    src = src.replace("[patch.crates-io]\n", "[patch.crates-io]\n" + line, 1)
+else:
+    src += "\n[patch.crates-io]\n" + line
+open(path, "w").write(src)
+print("Cargo.toml patched with swc fork")
+PYEOF
+  git -C "$CHECKOUT" add Cargo.toml
+  git -C "$CHECKOUT" commit -q -m "workspace: use turbopack-wasi swc fork (wasm plugin.rs compile fix)" || true
+fi
 echo "patch series applied"
