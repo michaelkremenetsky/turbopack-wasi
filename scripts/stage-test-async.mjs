@@ -7,6 +7,7 @@ import { Worker } from 'node:worker_threads'
 const nativeDir =
   process.argv[2] ?? path.join(import.meta.dirname, '..', 'vendor/next.js/packages/next-swc/native')
 const require = createRequire(path.join(nativeDir, 'index.wasi.cjs'))
+const { makeReadCustomSection } = createRequire(import.meta.url)('./wasm-link-sections.cjs')
 const rt = require('@napi-rs/wasm-runtime')
 
 const bytes = fs.readFileSync(path.join(nativeDir, 'index.wasm32-wasi.wasm'))
@@ -49,6 +50,7 @@ const { napiModule } = await rt.instantiateNapiModule(bytes, {
       ...importObject.env,
       ...importObject.napi,
       ...importObject.emnapi,
+      read_custom_section: makeReadCustomSection(bytes, () => importObject.env.memory),
       memory: new WebAssembly.Memory({ initial: 4096, maximum: 65536, shared: true }),
     }
     return importObject

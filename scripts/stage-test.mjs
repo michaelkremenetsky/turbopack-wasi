@@ -4,6 +4,7 @@ import path from 'node:path'
 
 const nativeDir = path.join(import.meta.dirname, '..', 'vendor/next.js/packages/next-swc/native')
 const require = createRequire(path.join(nativeDir, 'index.wasi.cjs'))
+const { makeReadCustomSection } = createRequire(import.meta.url)('./wasm-link-sections.cjs')
 
 console.error('[stage] requiring @napi-rs/wasm-runtime')
 const rt = require('@napi-rs/wasm-runtime')
@@ -44,6 +45,7 @@ const { napiModule } = rt.instantiateNapiModuleSync(bytes, {
       ...importObject.env,
       ...importObject.napi,
       ...importObject.emnapi,
+      read_custom_section: makeReadCustomSection(bytes, () => importObject.env.memory),
       memory: new WebAssembly.Memory({ initial: 4096, maximum: 65536, shared: true }),
     }
     return importObject
