@@ -105,6 +105,11 @@
 //!
 //! See [swc_ecma_minifier::eval::Evaluator].
 #![deny(unused)]
+// (turbopack-wasi) On wasm the plugin-execution paths are cfg'd out (no wasmtime
+// backend), which legitimately leaves plugin-host plumbing (e.g. the metadata
+// context in `config`) unused. Keep `deny(unused)` everywhere else; relax it on
+// wasm so those cfg-orphaned bindings don't fail the build one at a time.
+#![cfg_attr(target_arch = "wasm32", allow(unused))]
 #![allow(clippy::too_many_arguments)]
 #![allow(clippy::mutable_key_type)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
