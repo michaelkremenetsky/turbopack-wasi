@@ -1,0 +1,476 @@
+From 8b8903a97e93643f537927763adbe8553d6d05ab Mon Sep 17 00:00:00 2001
+From: turbopack-wasi build <build@turbopack-wasi.invalid>
+Date: Wed, 5 Aug 2026 09:11:47 -0700
+Subject: [PATCH 27/28] turbo-persistence: read files into memory where mmap is
+ unsupported (wasi)
+
+turbo-persistence memory-maps every meta/SST/blob file it reads back via
+memmap2, which has no wasm32-wasip1 backend: Mmap::map fails at runtime with
+"platform not supported". On wasi that made every snapshot commit fail while
+opening the meta file it had just written ("Unable to commit snapshot / Failed
+to mmap"), roll back via the write guard, and swallow the error -- so the
+on-disk store silently persisted nothing (only CURRENT at seq 0) and no run
+ever restored.
+
+Introduce a FileMap abstraction (mmap_helper.rs) that is a real memmap2 map on
+targets that support it and an owned heap buffer (read the whole file) on wasi.
+Both deref to &[u8], so every read path is unchanged; the madvise hints stay
+#[cfg(unix)] and are absent on the owned path. A boxed slice has a stable
+address for its lifetime, so the zero-copy ArcBytes/RcBytes from_mmap subslice
+invariants hold exactly as for an mmap. Native builds are unchanged.
+
+Verified end-to-end against the cal.com fixture under Node WASI: the store now
+persists (1.3GB, CURRENT advances), a second run restores in 2.5s vs 62s cold
+(24x), and compaction reads old SSTs + writes new -- no mmap/open/checksum
+errors.
+---
+ .../crates/turbo-persistence/src/arc_bytes.rs |  9 +-
+ .../turbo-persistence/src/bin/sst_inspect.rs  |  7 +-
+ turbopack/crates/turbo-persistence/src/db.rs  |  5 +-
+ .../crates/turbo-persistence/src/meta_file.rs |  7 +-
+ .../turbo-persistence/src/mmap_helper.rs      | 87 ++++++++++++++++++-
+ .../crates/turbo-persistence/src/rc_bytes.rs  |  9 +-
+ .../turbo-persistence/src/shared_bytes.rs     |  7 +-
+ .../src/static_sorted_file.rs                 | 25 +++---
+ 8 files changed, 117 insertions(+), 39 deletions(-)
+
+diff --git a/turbopack/crates/turbo-persistence/src/arc_bytes.rs b/turbopack/crates/turbo-persistence/src/arc_bytes.rs
+index 51900c35..25cf3d38 100644
+--- a/turbopack/crates/turbo-persistence/src/arc_bytes.rs
++++ b/turbopack/crates/turbo-persistence/src/arc_bytes.rs
+@@ -6,10 +6,9 @@ use std::{
+     sync::Arc,
+ };
+ 
+-use memmap2::Mmap;
+-
+ use crate::{
+     compression::decompress_into_arc,
++    mmap_helper::FileMap,
+     shared_bytes::{SharedBytes, is_subslice_of},
+ };
+ /// The backing storage for an `ArcBytes`.
+@@ -19,7 +18,7 @@ use crate::{
+ #[derive(Clone)]
+ enum Backing {
+     Arc { _backing: Arc<[u8]> },
+-    Mmap { _backing: Arc<Mmap> },
++    Mmap { _backing: Arc<FileMap> },
+ }
+ 
+ /// An owned byte slice backed by either an `Arc<[u8]>` or a memory-mapped file.
+@@ -103,7 +102,7 @@ impl ArcBytes {
+ }
+ 
+ impl SharedBytes for ArcBytes {
+-    type MmapHandle = Arc<Mmap>;
++    type MmapHandle = Arc<FileMap>;
+ 
+     fn slice(self, range: Range<usize>) -> Self {
+         let data = &*self;
+@@ -131,7 +130,7 @@ impl SharedBytes for ArcBytes {
+         }
+     }
+ 
+-    unsafe fn from_mmap(mmap: &Arc<Mmap>, subslice: &[u8]) -> Self {
++    unsafe fn from_mmap(mmap: &Arc<FileMap>, subslice: &[u8]) -> Self {
+         debug_assert!(
+             is_subslice_of(subslice, mmap),
+             "from_mmap: subslice is not within the mmap"
+diff --git a/turbopack/crates/turbo-persistence/src/bin/sst_inspect.rs b/turbopack/crates/turbo-persistence/src/bin/sst_inspect.rs
+index 4bda8d36..8eb1afce 100644
+--- a/turbopack/crates/turbo-persistence/src/bin/sst_inspect.rs
++++ b/turbopack/crates/turbo-persistence/src/bin/sst_inspect.rs
+@@ -19,11 +19,10 @@ use anyhow::{Context, Result, bail};
+ use byteorder::{BE, ReadBytesExt};
+ use fs_err::{self as fs, File};
+ use lzzzz::lz4::decompress;
+-use memmap2::Mmap;
+ use turbo_persistence::{
+     BLOCK_HEADER_SIZE, checksum_block,
+     meta_file::MetaFile,
+-    mmap_helper::advise_mmap_for_persistence,
++    mmap_helper::{FileMap, advise_mmap_for_persistence},
+     sst_filter::SstFilter,
+     static_sorted_file::{
+         BLOCK_TYPE_FIXED_KEY_NO_HASH, BLOCK_TYPE_FIXED_KEY_WITH_HASH, BLOCK_TYPE_KEY_NO_HASH,
+@@ -287,7 +286,7 @@ struct RawBlock {
+ 
+ /// Reads, checksums, and decompresses a single block from the mmap.
+ fn read_block(
+-    mmap: &Mmap,
++    mmap: &FileMap,
+     block_offsets_start: usize,
+     block_index: u16,
+     sequence_number: u32,
+@@ -426,7 +425,7 @@ fn analyze_sst_file(db_path: &Path, info: &SstInfo) -> Result<SstStats> {
+ 
+     let file = File::open(&path)?;
+     let file_size = file.metadata()?.len();
+-    let mmap = unsafe { Mmap::map(file.file())? };
++    let mmap = unsafe { FileMap::map(file.file())? };
+     advise_mmap_for_persistence(&mmap)?;
+ 
+     let mut stats = SstStats {
+diff --git a/turbopack/crates/turbo-persistence/src/db.rs b/turbopack/crates/turbo-persistence/src/db.rs
+index 014a37a9..382c87f3 100644
+--- a/turbopack/crates/turbo-persistence/src/db.rs
++++ b/turbopack/crates/turbo-persistence/src/db.rs
+@@ -17,7 +17,6 @@ use byteorder::{BE, ReadBytesExt, WriteBytesExt};
+ use dashmap::DashSet;
+ use fs_err::{self as fs, File, OpenOptions, ReadDir};
+ use jiff::Timestamp;
+-use memmap2::Mmap;
+ use nohash_hasher::BuildNoHashHasher;
+ use parking_lot::{Mutex, RwLock};
+ use smallvec::SmallVec;
+@@ -38,7 +37,7 @@ use crate::{
+     merge_iter::MergeIter,
+     meta_file::{MetaEntryFlags, MetaFile, MetaLookupResult, StaticSortedFileRange},
+     meta_file_builder::MetaFileBuilder,
+-    mmap_helper::advise_mmap_for_persistence,
++    mmap_helper::{FileMap, advise_mmap_for_persistence},
+     parallel_scheduler::ParallelScheduler,
+     rc_bytes::RcBytes,
+     sst_filter::SstFilter,
+@@ -607,7 +606,7 @@ impl<S: ParallelScheduler, const FAMILIES: usize> TurboPersistence<S, FAMILIES>
+     fn read_blob(&self, seq: u32) -> Result<ArcBytes> {
+         let path = self.path.join(format!("{seq:08}.blob"));
+         let file = File::open(&path)?;
+-        let mmap = unsafe { Mmap::map(file.file()) }.with_context(|| {
++        let mmap = unsafe { FileMap::map(file.file()) }.with_context(|| {
+             format!(
+                 "Failed to mmap blob file {} ({} bytes)",
+                 path.display(),
+diff --git a/turbopack/crates/turbo-persistence/src/meta_file.rs b/turbopack/crates/turbo-persistence/src/meta_file.rs
+index dbde5538..3e9bdf71 100644
+--- a/turbopack/crates/turbo-persistence/src/meta_file.rs
++++ b/turbopack/crates/turbo-persistence/src/meta_file.rs
+@@ -9,14 +9,13 @@ use anyhow::{Context, Result, bail};
+ use bitfield::bitfield;
+ use byteorder::{BE, ReadBytesExt};
+ use fs_err::File;
+-use memmap2::{Mmap, MmapOptions};
+ use smallvec::SmallVec;
+ use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Ref, big_endian as be};
+ 
+ use crate::{
+     QueryKey,
+     lookup_entry::LookupValue,
+-    mmap_helper::advise_mmap_for_persistence,
++    mmap_helper::{FileMap, advise_mmap_for_persistence},
+     static_sorted_file::{BlockCache, SstLookupResult, StaticSortedFile, StaticSortedFileMetaData},
+ };
+ 
+@@ -253,7 +252,7 @@ pub struct MetaFile {
+     /// The memory mapped file.
+     /// The entire memory-mapped file. Must be the last field that matters for drop order —
+     /// `entries` contains `FilterRef`s that borrow from this mmap.
+-    mmap: Mmap,
++    mmap: FileMap,
+ }
+ 
+ impl MetaFile {
+@@ -268,7 +267,7 @@ impl MetaFile {
+ 
+     fn open_internal(db_path: PathBuf, sequence_number: u32, path: &Path) -> Result<Self> {
+         let file = File::open(path)?;
+-        let mmap = unsafe { MmapOptions::new().map(file.file()) }.context("Failed to mmap")?;
++        let mmap = unsafe { FileMap::map(file.file()) }.context("Failed to mmap")?;
+         #[cfg(unix)]
+         mmap.advise(memmap2::Advice::Random)
+             .context("Failed to advise mmap")?;
+diff --git a/turbopack/crates/turbo-persistence/src/mmap_helper.rs b/turbopack/crates/turbo-persistence/src/mmap_helper.rs
+index a6d5e657..259b6fa4 100644
+--- a/turbopack/crates/turbo-persistence/src/mmap_helper.rs
++++ b/turbopack/crates/turbo-persistence/src/mmap_helper.rs
+@@ -1,9 +1,92 @@
++use std::{fs::File, ops::Deref};
++
++/// A read-only view of a file's bytes.
++///
++/// Backed by an OS memory map (`memmap2`) on platforms that support it, and by
++/// an owned heap buffer on `wasm32-wasip1`, where `memmap2` has no backend and
++/// `Mmap::map` fails at runtime with "platform not supported" (which otherwise
++/// makes every snapshot commit fail and roll back, so nothing is ever
++/// persisted). Both variants deref to `&[u8]`, so the read paths are identical;
++/// the `madvise` hints are `#[cfg(unix)]` and simply absent on the owned path.
++///
++/// A boxed slice has a stable address for its whole lifetime, so the zero-copy
++/// `ArcBytes`/`RcBytes` `from_mmap` subslice invariants hold for the owned
++/// variant exactly as they do for a real mmap.
++#[allow(dead_code)] // one variant is unused per target (Owned off-wasi, Mmap on wasi target_os)
++pub enum FileMap {
++    Mmap(memmap2::Mmap),
++    Owned(Box<[u8]>),
++}
++
++impl FileMap {
++    /// Maps the entire file read-only, or on wasi reads it into an owned buffer.
++    ///
++    /// # Safety
++    ///
++    /// On the mmap path the file must not be modified for the lifetime of the
++    /// returned `FileMap` — the same contract as [`memmap2::Mmap::map`]. The
++    /// owned path has no such requirement (it copies eagerly).
++    pub unsafe fn map(file: &File) -> std::io::Result<FileMap> {
++        #[cfg(not(target_os = "wasi"))]
++        {
++            Ok(FileMap::Mmap(unsafe { memmap2::Mmap::map(file)? }))
++        }
++        #[cfg(target_os = "wasi")]
++        {
++            use std::io::Read;
++            let len = file.metadata()?.len() as usize;
++            let mut buf = Vec::with_capacity(len);
++            // `&File: Read`; callers open the file immediately before mapping, so
++            // the cursor is at the start. Reading from the shared reference keeps
++            // the caller's handle usable and avoids `try_clone`/`seek`, which are
++            // shakier on wasi.
++            let mut reader: &File = file;
++            reader.read_to_end(&mut buf)?;
++            Ok(FileMap::Owned(buf.into_boxed_slice()))
++        }
++    }
++
++    /// `madvise` hint for the whole map. No-op on the owned (wasi) path.
++    #[cfg(unix)]
++    pub fn advise(&self, advice: memmap2::Advice) -> std::io::Result<()> {
++        match self {
++            FileMap::Mmap(m) => m.advise(advice),
++            FileMap::Owned(_) => Ok(()),
++        }
++    }
++
++    /// `madvise` hint for a sub-range. No-op on the owned (wasi) path.
++    #[cfg(unix)]
++    pub fn advise_range(
++        &self,
++        advice: memmap2::Advice,
++        offset: usize,
++        len: usize,
++    ) -> std::io::Result<()> {
++        match self {
++            FileMap::Mmap(m) => m.advise_range(advice, offset, len),
++            FileMap::Owned(_) => Ok(()),
++        }
++    }
++}
++
++impl Deref for FileMap {
++    type Target = [u8];
++
++    fn deref(&self) -> &[u8] {
++        match self {
++            FileMap::Mmap(m) => m,
++            FileMap::Owned(b) => b,
++        }
++    }
++}
++
+ /// Apply Linux-specific mmap advice flags that should be set on all persistent mmaps.
+ ///
+ /// - `DontFork`: prevents mmap regions from being copied into child processes on `fork()`, avoiding
+ ///   unnecessary memory duplication and potential SIGBUS.
+ #[cfg(target_os = "linux")]
+-pub fn advise_mmap_for_persistence(mmap: &memmap2::Mmap) -> anyhow::Result<()> {
++pub fn advise_mmap_for_persistence(mmap: &FileMap) -> anyhow::Result<()> {
+     use anyhow::Context;
+     mmap.advise(memmap2::Advice::DontFork)
+         .context("Failed to advise mmap DontFork")?;
+@@ -11,6 +94,6 @@ pub fn advise_mmap_for_persistence(mmap: &memmap2::Mmap) -> anyhow::Result<()> {
+ }
+ 
+ #[cfg(not(target_os = "linux"))]
+-pub fn advise_mmap_for_persistence(_mmap: &memmap2::Mmap) -> anyhow::Result<()> {
++pub fn advise_mmap_for_persistence(_mmap: &FileMap) -> anyhow::Result<()> {
+     Ok(())
+ }
+diff --git a/turbopack/crates/turbo-persistence/src/rc_bytes.rs b/turbopack/crates/turbo-persistence/src/rc_bytes.rs
+index f9f2097c..693e1a14 100644
+--- a/turbopack/crates/turbo-persistence/src/rc_bytes.rs
++++ b/turbopack/crates/turbo-persistence/src/rc_bytes.rs
+@@ -5,10 +5,9 @@ use std::{
+     rc::Rc,
+ };
+ 
+-use memmap2::Mmap;
+-
+ use crate::{
+     compression::decompress_into_rc,
++    mmap_helper::FileMap,
+     shared_bytes::{SharedBytes, is_subslice_of},
+ };
+ 
+@@ -18,7 +17,7 @@ use crate::{
+ #[derive(Clone)]
+ enum Backing {
+     Rc { _backing: Rc<[u8]> },
+-    Mmap { _backing: Rc<Mmap> },
++    Mmap { _backing: Rc<FileMap> },
+ }
+ 
+ /// An owned byte slice backed by either an `Rc<[u8]>` or a memory-mapped file.
+@@ -76,7 +75,7 @@ impl Debug for RcBytes {
+ impl Eq for RcBytes {}
+ 
+ impl SharedBytes for RcBytes {
+-    type MmapHandle = Rc<Mmap>;
++    type MmapHandle = Rc<FileMap>;
+ 
+     fn slice(self, range: Range<usize>) -> Self {
+         let data = &*self;
+@@ -104,7 +103,7 @@ impl SharedBytes for RcBytes {
+         }
+     }
+ 
+-    unsafe fn from_mmap(mmap: &Rc<Mmap>, subslice: &[u8]) -> Self {
++    unsafe fn from_mmap(mmap: &Rc<FileMap>, subslice: &[u8]) -> Self {
+         debug_assert!(
+             is_subslice_of(subslice, mmap),
+             "from_mmap: subslice is not within the mmap"
+diff --git a/turbopack/crates/turbo-persistence/src/shared_bytes.rs b/turbopack/crates/turbo-persistence/src/shared_bytes.rs
+index fd9fc463..640bdd9a 100644
+--- a/turbopack/crates/turbo-persistence/src/shared_bytes.rs
++++ b/turbopack/crates/turbo-persistence/src/shared_bytes.rs
+@@ -1,6 +1,6 @@
+ use std::ops::{Deref, Range};
+ 
+-use memmap2::Mmap;
++use crate::mmap_helper::FileMap;
+ 
+ /// Trait abstracting over `ArcBytes` and `RcBytes`.
+ ///
+@@ -12,8 +12,9 @@ use memmap2::Mmap;
+ /// `static_sorted_file.rs` (block reading, key matching, etc.) can be written
+ /// once and used for both lookup (ArcBytes) and iteration (RcBytes) paths.
+ pub trait SharedBytes: Clone + Deref<Target = [u8]> + Sized {
+-    /// The ref-counted handle to the memory-mapped file.
+-    type MmapHandle: Deref<Target = Mmap>;
++    /// The ref-counted handle to the file's bytes (mmap, or an owned buffer on
++    /// targets without mmap support).
++    type MmapHandle: Deref<Target = FileMap>;
+ 
+     /// Returns a new instance that points to a sub-range of the current slice.
+     fn slice(self, range: Range<usize>) -> Self;
+diff --git a/turbopack/crates/turbo-persistence/src/static_sorted_file.rs b/turbopack/crates/turbo-persistence/src/static_sorted_file.rs
+index 4bd1a233..7df3a8c2 100644
+--- a/turbopack/crates/turbo-persistence/src/static_sorted_file.rs
++++ b/turbopack/crates/turbo-persistence/src/static_sorted_file.rs
+@@ -11,7 +11,6 @@ use std::{
+ 
+ use anyhow::{Context, Result, bail, ensure};
+ use fs_err::File;
+-use memmap2::Mmap;
+ use quick_cache::{Lifecycle, sync::GuardResult};
+ use rustc_hash::FxHasher;
+ use smallvec::SmallVec;
+@@ -23,7 +22,7 @@ use crate::{
+     compression::checksum_block,
+     constants::MAX_INLINE_VALUE_SIZE,
+     lookup_entry::{IterValue, LookupEntry, LookupValue},
+-    mmap_helper::advise_mmap_for_persistence,
++    mmap_helper::{FileMap, advise_mmap_for_persistence},
+     rc_bytes::RcBytes,
+     shared_bytes::SharedBytes,
+     static_sorted_file_builder::{BLOCK_HEADER_SIZE, INDEX_BLOCK_ENTRY_SIZE},
+@@ -156,7 +155,7 @@ struct ArcBlockCacheReader<'a> {
+ impl ValueBlockCache<ArcBytes> for ArcBlockCacheReader<'_> {
+     fn get_or_read(
+         self,
+-        mmap: &Arc<Mmap>,
++        mmap: &Arc<FileMap>,
+         meta: &StaticSortedFileMetaData,
+         block_index: u16,
+     ) -> Result<ArcBytes> {
+@@ -168,7 +167,7 @@ impl ValueBlockCache<ArcBytes> for ArcBlockCacheReader<'_> {
+ impl ValueBlockCache<RcBytes> for &mut Option<(u16, RcBytes)> {
+     fn get_or_read(
+         self,
+-        mmap: &Rc<Mmap>,
++        mmap: &Rc<FileMap>,
+         meta: &StaticSortedFileMetaData,
+         block_index: u16,
+     ) -> Result<RcBytes> {
+@@ -205,7 +204,7 @@ pub struct StaticSortedFile {
+     /// The memory mapped file.
+     /// We store as an Arc so we can hand out references (via ArcBytes) that can outlive this
+     /// struct (not that we expect them to outlive it by very much)
+-    mmap: Arc<Mmap>,
++    mmap: Arc<FileMap>,
+     /// One bit per block, set when that block's CRC has been verified at least once.
+     /// Uncompressed (mmap-backed) blocks bypass the `BlockCache`, so without this
+     /// bitmap the CRC would be re-computed on every access. `Relaxed` ordering
+@@ -220,7 +219,7 @@ impl StaticSortedFile {
+         let filename = format!("{:08}.sst", meta.sequence_number);
+         let path = db_path.join(&filename);
+         let file = File::open(&path)?;
+-        let mmap = unsafe { Mmap::map(file.file()) }.with_context(|| {
++        let mmap = unsafe { FileMap::map(file.file()) }.with_context(|| {
+             format!(
+                 "Failed to mmap SST file {} ({} bytes)",
+                 path.display(),
+@@ -490,7 +489,7 @@ impl StaticSortedFile {
+ /// `verified_blocks`. Compressed blocks are looked up in `cache`; on a
+ /// miss they are decompressed, CRC-verified, and inserted.
+ fn get_or_cache_block(
+-    mmap: &Arc<Mmap>,
++    mmap: &Arc<FileMap>,
+     meta: &StaticSortedFileMetaData,
+     block_index: u16,
+     cache: &BlockCache,
+@@ -537,7 +536,7 @@ fn get_or_cache_block(
+ /// Gets the raw block slice directly from a memory-mapped file.
+ /// Returns `(uncompressed_length, checksum, block_data)`.
+ fn get_raw_block_slice<'a>(
+-    mmap: &'a Mmap,
++    mmap: &'a FileMap,
+     meta: &StaticSortedFileMetaData,
+     block_index: u16,
+ ) -> Result<(u32, u32, &'a [u8])> {
+@@ -726,7 +725,7 @@ fn handle_key_match_generic<B: SharedBytes>(
+ pub struct StaticSortedFileIter {
+     /// The memory-mapped file, wrapped in `Rc` for non-atomic refcounting.
+     /// All `RcBytes` slices produced during iteration share this `Rc`.
+-    mmap: Rc<Mmap>,
++    mmap: Rc<FileMap>,
+     /// Metadata (sequence number, block count) needed for block access.
+     meta: StaticSortedFileMetaData,
+ 
+@@ -775,13 +774,13 @@ impl Iterator for StaticSortedFileIter {
+ 
+ impl StaticSortedFileIter {
+     /// Opens an SST file for sequential iteration. Uses `MADV_SEQUENTIAL` for
+-    /// read-ahead and wraps the mmap in `Rc<Mmap>` directly (no `Arc`),
++    /// read-ahead and wraps the mmap in `Rc<FileMap>` directly (no `Arc`),
+     /// eliminating all atomic refcounting during iteration.
+     pub fn open(db_path: &Path, meta: StaticSortedFileMetaData) -> Result<Self> {
+         let filename = format!("{:08}.sst", meta.sequence_number);
+         let path = db_path.join(&filename);
+         let file = File::open(&path)?;
+-        let mmap = unsafe { Mmap::map(file.file()) }.with_context(|| {
++        let mmap = unsafe { FileMap::map(file.file()) }.with_context(|| {
+             format!(
+                 "Failed to mmap SST file {} ({} bytes)",
+                 path.display(),
+@@ -795,7 +794,7 @@ impl StaticSortedFileIter {
+             .with_context(|| format!("Unable to open static sorted file {filename}"))
+     }
+ 
+-    fn new(mmap: Rc<Mmap>, meta: StaticSortedFileMetaData) -> Result<Self> {
++    fn new(mmap: Rc<FileMap>, meta: StaticSortedFileMetaData) -> Result<Self> {
+         let root_block_index = meta.block_count - 1;
+         let block: RcBytes = read_block_generic(&mmap, &meta, root_block_index)?;
+         let block_type = block[0];
+@@ -830,7 +829,7 @@ impl StaticSortedFileIter {
+ 
+     /// Parses a key block at the given index, returning `RcBytes`-backed data.
+     fn parse_key_block(
+-        mmap: &Rc<Mmap>,
++        mmap: &Rc<FileMap>,
+         meta: &StaticSortedFileMetaData,
+         block_index: u16,
+     ) -> Result<CurrentKeyBlock> {
+-- 
+2.50.1 (Apple Git-155)
+

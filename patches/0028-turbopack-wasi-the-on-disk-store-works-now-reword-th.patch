@@ -1,0 +1,63 @@
+From c54615da0c0e0c4018fe28cab54eab057bd6610f Mon Sep 17 00:00:00 2001
+From: turbopack-wasi build <build@turbopack-wasi.invalid>
+Date: Wed, 5 Aug 2026 09:12:35 -0700
+Subject: [PATCH 28/28] =?UTF-8?q?turbopack-wasi:=20the=20on-disk=20store?=
+ =?UTF-8?q?=20works=20now=20=E2=80=94=20reword=20the=20wasi=20persist=20ga?=
+ =?UTF-8?q?te?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The store no longer trips anything on wasi (the real blocker was memmap2 having
+no wasip1 backend, now fixed by the FileMap owned-buffer fallback). Correct the
+stale comment (it blamed a thread-local/SyncUnsafeCell concurrency assertion
+that was never the cause) and reframe the TURBOPACK_WASI_ALLOW_DISK_STORE opt-in
+as a deliberate policy gate — kept off by default because the browser runtime's
+store lives in OPFS and a real app's cache is ~1GB+, not because it's broken.
+---
+ .../src/next_api/turbopack_ctx.rs             | 25 +++++++++++--------
+ 1 file changed, 14 insertions(+), 11 deletions(-)
+
+diff --git a/crates/next-napi-bindings/src/next_api/turbopack_ctx.rs b/crates/next-napi-bindings/src/next_api/turbopack_ctx.rs
+index 26e1a32c..5c41a023 100644
+--- a/crates/next-napi-bindings/src/next_api/turbopack_ctx.rs
++++ b/crates/next-napi-bindings/src/next_api/turbopack_ctx.rs
+@@ -266,21 +266,24 @@ pub fn create_turbo_tasks(
+     skip_compaction: bool,
+     turbopack_memory_eviction: MemoryEvictionMode,
+ ) -> Result<NextTurboTasks> {
+-    // The on-disk turbo-persistence store currently trips write-batch
+-    // concurrency assertions on wasi: its write path hands out `&mut` from a
+-    // thread-local `SyncUnsafeCell`, which is only sound while thread ids are
+-    // not recycled, and the wasi pthread pool (built with `on_thread_stop` plus
+-    // an idle-timing-out blocking pool) churns threads mid-batch. Until that is
+-    // hardened, force the in-memory (noop) backing store on wasi. Set
+-    // TURBOPACK_WASI_ALLOW_DISK_STORE=1 to opt back into the on-disk path (for
+-    // reproducing/bisecting the store bug).
++    // The on-disk turbo-persistence store now works on wasi (verified end-to-end
++    // at cal.com scale: write -> restore -> compaction) since the memmap2 ->
++    // owned-buffer read fallback landed — before that, every snapshot commit
++    // failed with "Failed to mmap: platform not supported" and silently rolled
++    // back, persisting nothing. It is kept OFF by default here for a different,
++    // deliberate reason: on the browser runtime the store lives in OPFS and a
++    // real app's cache is large (~1GB+ for cal.com), so we don't want every wasi
++    // build to silently fill the user's origin storage. Opt in with
++    // TURBOPACK_WASI_ALLOW_DISK_STORE=1 (host builds with disk to spare, or once
++    // an OPFS quota/eviction policy is in place). This is a policy gate, not a
++    // correctness one.
+     #[cfg(target_os = "wasi")]
+     let persistent_caching = {
+         if persistent_caching && std::env::var_os("TURBOPACK_WASI_ALLOW_DISK_STORE").is_none() {
+             tracing::warn!(
+-                "persistent (on-disk) caching was requested but is not yet supported on \
+-                 wasi; falling back to the in-memory store. Set \
+-                 TURBOPACK_WASI_ALLOW_DISK_STORE=1 to force the on-disk path."
++                "persistent (on-disk) caching is supported on wasi but kept off by default \
++                 (browser OPFS storage footprint); using the in-memory store. Set \
++                 TURBOPACK_WASI_ALLOW_DISK_STORE=1 to enable the on-disk path."
+             );
+             false
+         } else {
+-- 
+2.50.1 (Apple Git-155)
+

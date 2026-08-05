@@ -1,16 +1,20 @@
 # The on-disk turbo-tasks store on wasi
 
-## What's actually wrong (root-caused)
+**Status: fixed and verified (patches 27 + 28).** The store persists, restores,
+and compacts on wasi. It is kept off by default only for OPFS storage-footprint
+reasons; opt in with `TURBOPACK_WASI_ALLOW_DISK_STORE=1`. The rest of this doc is
+the root-cause writeup that led to the fix.
+
+## What was actually wrong (root-caused)
 
 Turbopack can persist its turbo-tasks cache to disk (`.next/cache/.../turbopack`)
-so a second run reuses the first's work. On `wasm32-wasip1(-threads)` that path is
-forced off; every build runs the in-memory (`noop`) store.
+so a second run reuses the first's work. On `wasm32-wasip1(-threads)` that path
+was forced off; every build ran the in-memory (`noop`) store.
 
-The real reason it was forced off is **not** the write-batch concurrency
-assertion the gate comment blames. Running the on-disk store on wasi at cal.com
-scale (see the repro below) shows it never asserts, never panics, and survives
-concurrent compilation + graceful shutdown. What it does instead is fail to
-persist, silently:
+The real reason was **not** the write-batch concurrency assertion the old gate
+comment blamed. Running the on-disk store on wasi at cal.com scale (see the repro
+below) shows it never asserts, never panics, and survives concurrent compilation
++ graceful shutdown. What it did instead was fail to persist, silently:
 
     Persisting failed during shutdown: Unable to commit snapshot
     Caused by:
@@ -34,42 +38,48 @@ This is why the WASI errno trace during shutdown is clean — `memmap2` fails
 internally and issues no (failing) syscall — and why nothing ever crashes: the
 failure is on the read-back-via-mmap step, caught and dropped.
 
-## The fix
+## The fix (patch 27)
 
-Give `turbo-persistence` a non-mmap file backing on targets where `memmap2`
-isn't supported: on wasi, read the whole file into an owned heap buffer
-(`Box<[u8]>` / `Vec<u8>`) instead of mapping it. A boxed slice has a stable
-address for the file's lifetime, so it satisfies the same borrow contract the
-mmap paths rely on (notably `meta_file.rs`'s `FilterRef` `'static` transmute and
-its declared field drop-order), arguably more safely (no unmap window).
+Gives `turbo-persistence` a non-mmap file backing where `memmap2` isn't
+supported: a `FileMap` type (in `mmap_helper.rs`) that is a real `memmap2::Mmap`
+off-wasi and an owned heap buffer (whole-file read) on `#[cfg(target_os =
+"wasi")]`. Both `Deref<[u8]>`, so every read path is unchanged; the `madvise`
+hints stay `#[cfg(unix)]` and are simply absent on the owned path. A boxed
+slice's stable address preserves the zero-copy `ArcBytes`/`RcBytes` `from_mmap`
+subslice invariants (and `meta_file.rs`'s `FilterRef` `'static` transmute /
+field drop-order) exactly as an mmap would. Native builds are byte-identical.
 
-Sites to convert (all in `turbopack/crates/turbo-persistence/src`):
-- `meta_file.rs` — `MetaFile.mmap: Mmap` (`Mmap`/`MmapOptions` at `12`); this is
-  the one that actually fails first (`Unable to open meta file`).
-- `db.rs:610` — blob-file `Mmap::map`.
-- the SST reader's mmap (`static_sorted_file*.rs`).
-- `rc_bytes.rs` / `arc_bytes.rs` — already model a `Backing::Mmap` variant; add /
-  reuse an owned-buffer variant for the wasi path so `RcBytes`/`ArcBytes` can be
-  backed by either.
-- `mmap_helper.rs` — already cfg-gates `advise_mmap_for_persistence` (linux-only,
-  no-op elsewhere); the natural home for a `map_or_read(file) -> FileBacking`
-  helper that is `Mmap::map` off-wasi and `read-to-end` on wasi.
+`memmap2::Mmap` is swapped for `FileMap` in `meta_file.rs`, `db.rs`,
+`static_sorted_file.rs`, `rc_bytes.rs`, `arc_bytes.rs`, `shared_bytes.rs` (the
+`SharedBytes::MmapHandle: Deref<Target = FileMap>` bound), and the `sst_inspect`
+debug bin; `mmap_helper.rs` grows the `FileMap` definition.
 
-Keep it behind `#[cfg(target_family = "wasi")]` (or `not`-mmap-capable) so native
-builds are byte-for-byte unchanged. This is upstreamable: `memmap2` genuinely has
-no wasi backend, and a read-based fallback is the conventional workaround.
+### Verified (patch 27, cal.com fixture, Node WASI)
 
-Once persistence lands data, re-run the repro and confirm a second run restores
-(warm cache), then the wasi force-off gate (below) can be removed.
+`scripts/real-app-test.mjs` with `TURBOPACK_WASI_ALLOW_DISK_STORE=1
+TURBO_ENGINE_IGNORE_DIRTY=1 SHORT_SESSION=0 TEST_ALL_ROUTES=1` + graceful
+shutdown:
 
-## The gate to remove once fixed
+- **Before:** store dir is only `CURRENT` at seq 0 (0 data files); shutdown logs
+  the swallowed `Failed to mmap / platform not supported`.
+- **After:** first run persists ~1.3 GB (65 `.sst` + 4 `.meta`, `CURRENT`
+  advances to seq 69); a second run **restores** and finishes in **2.5 s vs 62 s
+  cold (24×)**; compaction reads old SSTs and writes new (`CURRENT` 69 → 79,
+  65 → 39 SSTs) — no mmap / open / checksum errors.
 
-`create_turbo_tasks`, `crates/next-napi-bindings/src/next_api/turbopack_ctx.rs:277-289`
-rewrites `persistent_caching` to `false` on wasi unless
-`TURBOPACK_WASI_ALLOW_DISK_STORE=1`. Its comment (recycled thread ids aliasing a
-`&mut` from a thread-local `SyncUnsafeCell`) is **wrong** — that was never the
-failure; replace it with the mmap explanation when the fallback lands. Installed
-by patch `0023`; the 32-bit build fix that lets the crate compile at all is patch
+The gate below (patch 28) is now a policy toggle, not a correctness one.
+
+## The gate (now a policy toggle, patch 28)
+
+`create_turbo_tasks`, `crates/next-napi-bindings/src/next_api/turbopack_ctx.rs`
+still rewrites `persistent_caching` to `false` on wasi unless
+`TURBOPACK_WASI_ALLOW_DISK_STORE=1` — but as of patch 28 that's a deliberate
+policy default (the browser store lives in OPFS and a real app's cache is
+~1GB+), not "it's broken." The old comment blaming a thread-local
+`SyncUnsafeCell` concurrency assertion was wrong and has been replaced with the
+mmap explanation. To make the store the wasi default, drop the `#[cfg(target_os
+= "wasi")]` block (or invert it to an opt-out) once an OPFS quota/eviction policy
+is in place. The 32-bit build fix that lets the crate compile at all is patch
 `0004` (`usize_from_u32`).
 
 ## Code map (verified, 16.3 layout)
@@ -121,8 +131,9 @@ Two flags are load-bearing and easy to miss:
 - graceful `project.shutdown()` — without it the process hard-exits before any
   snapshot fires and the store looks empty for the *wrong* reason.
 
-Ground truth observed (Aug 2026, `index.wasm32-wasi.wasm` 85 MB): 3× 40-route
+Ground truth (Aug 2026, `index.wasm32-wasi.wasm` 85 MB). Pre-fix: 3× 40-route
 concurrent runs compiled clean (`ok=40 failed=0`, no assertion), and the
 `Stop`-snapshot persist failed with the mmap error above, leaving `CURRENT` at
-`seq = 0`. After a fix, the same command's store dir should contain `.sst` /
-`.meta` files and a `CURRENT` at `seq > 0`, and a second run should restore.
+`seq = 0`. Post-fix (patch 27): the same command's store dir contains `.sst` /
+`.meta` files and a `CURRENT` at `seq > 0`, and a second run restores in ~2.5 s
+vs ~62 s cold — confirming the whole write → restore → compaction cycle.
