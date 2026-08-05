@@ -1,0 +1,21 @@
+# A minimal SWC transform plugin used to exercise the host-plugin bridge
+# end-to-end. It renames the identifier `__PLUGIN_MARKER_IN__` to
+# `__PLUGIN_MARKER_OUT__`, so a transform's output makes it obvious the plugin
+# actually ran. Pinned to the same swc_core major the binding is built against.
+[package]
+name = "plugin-marker"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+swc_core = { version = "=73.0.0", features = ["ecma_plugin_transform"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+
+# Detach from any surrounding workspace.
+[workspace]

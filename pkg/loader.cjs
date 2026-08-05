@@ -145,7 +145,26 @@ if (IN_POOL_WORKER) {
       dbg('module memory limits', JSON.stringify(limits));
 
       const threads = Math.max(2, parseInt(process.env.SRK_TURBOPACK_THREADS || '', 10) || 4);
+      // std::thread::available_parallelism() returns Err on wasi (no CPU probe),
+      // which collapses turbopack's JS evaluate pool (postcss / tailwind /
+      // webpack-loaders / next-font) to a concurrency of 1 for the WHOLE
+      // compilation, and leaves the turbo-tasks scope pool at its own default.
+      // A hello-world has one CSS entry so it's invisible, but a real monorepo
+      // then serializes every loader-evaluated module through a single worker.
+      // Tie both parallelism knobs to the same thread budget. Must be set before
+      // the WASI env and the pool workers are created (both capture process.env)
+      // so the guest reads it; an explicit override by the host is respected.
+      if (!process.env.TURBO_TASKS_AVAILABLE_PARALLELISM) {
+        process.env.TURBO_TASKS_AVAILABLE_PARALLELISM = String(threads);
+      }
+      if (!process.env.TURBOPACK_PARALLELISM) {
+        process.env.TURBOPACK_PARALLELISM = String(threads);
+      }
       const wasi = new WASI({ version: 'preview1', env: process.env, preopens: { '/': '/' } });
+
+      // Captured from overwriteImports below so the SWC-plugin bridge worker can
+      // view the guest's shared linear memory (where its control blocks live).
+      let pluginBridgeMemory = null;
 
       const { napiModule } = await rt.instantiateNapiModule(bytes, {
         context: rt.getDefaultContext(),
@@ -159,15 +178,16 @@ if (IN_POOL_WORKER) {
           return w;
         },
         overwriteImports(importObject) {
+          pluginBridgeMemory = new WebAssembly.Memory({
+            initial: limits.min,
+            maximum: limits.max ?? 65536,
+            shared: limits.shared,
+          });
           importObject.env = {
             ...importObject.env,
             ...importObject.napi,
             ...importObject.emnapi,
-            memory: new WebAssembly.Memory({
-              initial: limits.min,
-              maximum: limits.max ?? 65536,
-              shared: limits.shared,
-            }),
+            memory: pluginBridgeMemory,
           };
           return importObject;
         },
@@ -238,6 +258,34 @@ if (IN_POOL_WORKER) {
           if (conversionError) return Promise.reject(conversionError);
           dbg('fetch bridge:', url);
           return fetchOnce(url, userAgent, 5);
+        });
+      }
+
+      // Host SWC-plugin bridge: experimental.swcPlugins modules can't run inside
+      // the binding (no nested wasm engine), so they execute in a dedicated worker
+      // that owns a real WebAssembly engine (swc-plugin-worker.mjs;
+      // docs/swc-plugin-host-bridge.md). The binding signals the worker with the
+      // address of a control block in the shared linear memory; the worker drives
+      // the plugin and forwards its host imports back to the binding's swc
+      // closures. Spawned lazily on the first signal — apps with no swcPlugins
+      // never create it.
+      if (typeof raw.initSwcPluginBridge === 'function' && pluginBridgeMemory) {
+        let pluginWorker = null;
+        raw.initSwcPluginBridge((_conversionError, channelAddr) => {
+          if (!pluginWorker) {
+            pluginWorker = new Worker(path.join(__dirname, 'swc-plugin-worker.mjs'), {
+              workerData: { memory: pluginBridgeMemory },
+            });
+            // Don't keep the host process alive just for the plugin driver.
+            pluginWorker.unref();
+            pluginWorker.on('error', (e) =>
+              console.error('[next-swc-wasi] swc plugin worker error:', (e && e.message) || e));
+            pluginWorker.on('message', (m) => {
+              if (m && m.type === 'plugin-error') dbg('swc plugin error:', m.message);
+            });
+          }
+          dbg('swc plugin bridge: signal channel', channelAddr);
+          pluginWorker.postMessage({ channelAddr });
         });
       }
 

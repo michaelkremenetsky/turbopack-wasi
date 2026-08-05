@@ -1,0 +1,14 @@
+# SWC plugins are wasm32-wasip1 cdylibs that intern identifier strings through
+# hstr's thread-local Atom store during AST (de)serialization. rustc 1.87+ ships
+# a std change to wasip1 thread-local *destructor* registration that spins
+# forever in wasi-libc's pthread_key_delete (walking an uninitialized thread
+# list) the first time such a thread-local with a Drop type is touched — so the
+# plugin hangs on its very first Ident decode, under any host engine.
+#
+# Pin to the last toolchain before that regression. This matches how the SWC
+# project itself builds its fixture plugins (a pinned toolchain, not "whatever
+# stable is installed"). Bump only after verifying a plugin still runs to
+# completion via the fuel probe in scripts/.
+[toolchain]
+channel = "1.86.0"
+targets = ["wasm32-wasip1"]

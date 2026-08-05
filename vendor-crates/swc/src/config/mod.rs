@@ -818,7 +818,10 @@ impl Options {
             // Embedded runtime plugin target, based on assumption we have
             // 1. filesystem access for the cache
             // 2. embedded runtime can compiles & execute wasm
-            #[cfg(all(feature = "plugin", not(target_arch = "wasm32")))]
+            // (turbopack-wasi) Also taken on wasm: the wasi host has filesystem
+            // access (preopens) and executes the plugin wasm through the injected
+            // host-bridge runtime, so the embedded path's assumptions now hold.
+            #[cfg(feature = "plugin")]
             {
                 let plugin_runtime = self
                     .runtime_options
@@ -826,6 +829,11 @@ impl Options {
                     .clone()
                     .context("plugin runtime not configured")?;
 
+                // (turbopack-wasi) On wasm the on-disk module cache is unavailable
+                // (swc_plugin_runner gates its filesystem path out), so we skip
+                // pre-compiling into it; `RustPlugins::apply_inner` reads each
+                // plugin's bytes from the wasi filesystem directly instead.
+                #[cfg(not(target_arch = "wasm32"))]
                 if let Some(plugins) = &experimental.plugins {
                     crate::plugin::compile_wasm_plugins(
                         experimental.cache_root.as_deref(),
@@ -844,20 +852,6 @@ impl Options {
                     unresolved_mark,
                     plugin_runtime,
                 ))
-            }
-
-            // Native runtime plugin target, based on assumption we have
-            // 1. no filesystem access, loading binary / cache management should be
-            // performed externally
-            // 2. native runtime compiles & execute wasm (i.e v8 on node, chrome)
-            #[cfg(all(feature = "plugin", target_arch = "wasm32"))]
-            {
-                handler.warn(
-                    "Currently @swc/wasm does not support plugins, plugin transform will be \
-                     skipped. Refer https://github.com/swc-project/swc/issues/3934 for the details.",
-                );
-
-                Box::new(noop_pass())
             }
         };
 

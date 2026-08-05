@@ -11,7 +11,7 @@ use std::{path::PathBuf, sync::Arc};
 use anyhow::{Context, Result};
 use atoms::Atom;
 use common::FileName;
-#[cfg(all(feature = "plugin", not(feature = "manual-tokio-runtime")))]
+#[cfg(all(feature = "plugin", not(feature = "manual-tokio-runtime"), not(target_arch = "wasm32")))]
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use swc_common::errors::{DiagnosticId, HANDLER};
@@ -29,7 +29,7 @@ use swc_plugin_runner::runtime::Runtime as PluginRuntime;
 /// Shared tokio runtime for plugin execution.
 /// This avoids the expensive overhead of creating a new runtime for each plugin
 /// call.
-#[cfg(all(feature = "plugin", not(feature = "manual-tokio-runtime")))]
+#[cfg(all(feature = "plugin", not(feature = "manual-tokio-runtime"), not(target_arch = "wasm32")))]
 static SHARED_RUNTIME: Lazy<tokio::runtime::Runtime> = Lazy::new(|| {
     tokio::runtime::Runtime::new()
         .expect("Failed to create shared tokio runtime for plugin execution")
@@ -90,12 +90,16 @@ impl RustPlugins {
 
         let filename = self.metadata_context.filename.clone();
 
-        #[cfg(feature = "manual-tokio-runtime")]
+        // (turbopack-wasi) On wasm the host-bridge transform is synchronous — it
+        // rendezvouses with the driver worker over shared-memory atomics, not
+        // tokio — so call it directly, exactly as `manual-tokio-runtime` does,
+        // and avoid a nested `block_on` on the guest's runtime thread.
+        #[cfg(any(feature = "manual-tokio-runtime", target_arch = "wasm32"))]
         let ret = self
             .apply_inner(n)
             .with_context(|| format!("failed to invoke plugin on '{filename:?}'"));
 
-        #[cfg(not(feature = "manual-tokio-runtime"))]
+        #[cfg(all(not(feature = "manual-tokio-runtime"), not(target_arch = "wasm32")))]
         let ret = {
             let fut = async move { self.apply_inner(n) };
             if let Ok(handle) = tokio::runtime::Handle::try_current() {
@@ -113,7 +117,11 @@ impl RustPlugins {
         debug_assertions,
         tracing::instrument(level = "info", skip_all, name = "apply_plugins")
     )]
-    #[cfg(all(feature = "plugin", not(target_arch = "wasm32")))]
+    // (turbopack-wasi) Runs on wasm too: plugin execution is delegated to the
+    // embedder's WebAssembly engine via `swc-plugin-host-bridge` (the injected
+    // `plugin_runtime`), so the same `create_plugin_transform_executor` path the
+    // native build uses works here — no wasmtime backend needed in the guest.
+    #[cfg(feature = "plugin")]
     fn apply_inner(&mut self, n: Program) -> Result<Program, anyhow::Error> {
         use anyhow::Context;
         use swc_common::plugin::serialized::PluginSerializedBytes;
@@ -142,15 +150,38 @@ impl RustPlugins {
                 // transform.
                 if let Some(plugins) = &mut self.plugins {
                     for p in plugins.drain(..) {
-                        let plugin_module_bytes = crate::config::PLUGIN_MODULE_CACHE
-                            .inner
-                            .get()
-                            .unwrap()
-                            .lock()
-                            .get(&*self.plugin_runtime, &p.0)
-                            .expect("plugin module should be loaded");
+                        // (turbopack-wasi) The on-disk `PluginModuleCache` compiles
+                        // its filesystem path out on wasm (swc_plugin_runner gates
+                        // it behind `not(wasm32)`), so read the plugin bytes from
+                        // the wasi filesystem here and hand them straight to the
+                        // executor as raw bytes — exactly what turbopack does. The
+                        // host-bridge runtime's `prepare_module` just holds the
+                        // bytes, so no in-guest compilation is involved.
+                        #[cfg(target_arch = "wasm32")]
+                        let (plugin_module_bytes, plugin_name): (
+                            Box<dyn swc_plugin_runner::plugin_module_bytes::PluginModuleBytes>,
+                            String,
+                        ) = {
+                            use swc_plugin_runner::plugin_module_bytes::RawPluginModuleBytes;
+                            let raw = std::fs::read(&*p.0).with_context(|| {
+                                format!("failed to read swc plugin at {}", &p.0)
+                            })?;
+                            let name = p.0.to_string();
+                            (Box::new(RawPluginModuleBytes::new(name.clone(), raw)), name)
+                        };
 
-                        let plugin_name = plugin_module_bytes.get_module_name().to_string();
+                        #[cfg(not(target_arch = "wasm32"))]
+                        let (plugin_module_bytes, plugin_name) = {
+                            let bytes = crate::config::PLUGIN_MODULE_CACHE
+                                .inner
+                                .get()
+                                .unwrap()
+                                .lock()
+                                .get(&*self.plugin_runtime, &p.0)
+                                .expect("plugin module should be loaded");
+                            let name = bytes.get_module_name().to_string();
+                            (bytes, name)
+                        };
 
                         let mut transform_plugin_executor =
                             swc_plugin_runner::create_plugin_transform_executor(
@@ -191,16 +222,6 @@ impl RustPlugins {
         )
     }
 
-    #[cfg(all(feature = "plugin", target_arch = "wasm32"))]
-    #[cfg_attr(debug_assertions, tracing::instrument(level = "info", skip_all))]
-    fn apply_inner(&mut self, n: Program) -> Result<Program, anyhow::Error> {
-        // [TODO]: unimplemented
-        // (turbopack-wasi) upstream returns the bare `Program` here; the fn
-        // signature is `Result<Program, _>`, so it doesn't compile with
-        // `plugin` + wasm32. Plugins never run in this build (no wasmtime
-        // backend on wasm), so just pass the program through.
-        Ok(n)
-    }
 }
 
 #[cfg(feature = "plugin")]
