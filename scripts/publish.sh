@@ -59,6 +59,13 @@ mkdir -p "$STAGE"
 cp "$DIST"/index.wasm32-wasi.wasm "$DIST"/index.wasi.cjs "$DIST"/index.wasi-browser.js \
    "$DIST"/wasi-worker.mjs "$DIST"/wasi-worker-browser.mjs "$DIST"/index.d.ts \
    "$DIST"/index.js "$DIST"/browser.js "$STAGE"/ 2>/dev/null || true
+# wasm-link-sections.cjs is REQUIRED by the wasi-worker loaders (inject-read-custom-section.mjs
+# rewrites them to `require('./wasm-link-sections.cjs')` for the env.read_custom_section host
+# import). Without it every worker-thread spawn throws "Cannot find module
+# './wasm-link-sections.cjs'", which breaks `next build` (turbo-tasks worker pool) on wasi. It
+# must ship with the workers — copy it explicitly and fail loudly if it's absent from the build.
+cp "$DIST"/wasm-link-sections.cjs "$STAGE"/ \
+  || { echo "FATAL: $DIST/wasm-link-sections.cjs missing — the wasi workers can't load without it" >&2; exit 1; }
 # The self-contained loader trio (pkg/): auto.cjs (one-require engagement for
 # host runtimes), binding.cjs (next's custom-bindings entry), loader.cjs (the
 # async instantiation + pool-worker RPC bridge). Version-matched to next by
