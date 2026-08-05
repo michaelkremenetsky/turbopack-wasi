@@ -16,6 +16,13 @@ falls out — in this repo or in strapkit.
   `npx jest --ci --forceExit`, streaming to serve-web's /progress.
   (`--forceExit` is required: the binding's wasi worker threads legitimately
   keep the event loop alive after the run.)
+- `&cmd=<shell>` replaces the jest invocation with an arbitrary command (still
+  after `npm install`, still cd'd into the seeded project). Heredoc a probe
+  script through it to poke at the installed node_modules directly — that is
+  how the vm-leak repro below was isolated.
+- `&env=SRK_EVDBG=1` turns on the (uncommitted, strapkit-side) vm/event
+  instrumentation: sandbox-proxy trap probes, process listener register/invoke
+  probes, and a listener-throw probe, all via `process._rawDebug`.
 - `?swclocal=1` serves the locally packed next-swc-wasi
   (`publish.sh v16.3.0 --pack-only`) through the kernel fetch-proxy.
 
@@ -65,17 +72,48 @@ SANDBOX_GLOBAL):
    a real context global owns) before defining, so native merge semantics
    apply. Verified in-guest: the redefine signature is gone and the edge
    environment constructs.
-2. STILL OPEN: `TypeError: Cannot read properties of undefined (reading
-   'error')` at `addEventListener (<anonymous>:29:53)` invoked from
-   process.emit, reached from next's unhandled-rejection.external.tsx wrapping
-   process listeners (~46 suites, all environments; with --runInBand it kills
-   every next-importing suite). Chasing it with SRK_EVDBG=1 instrumentation in
-   deno's _events.mjs (REGISTER/INVOKE probes with _rawDebug — jest's console
-   capture swallows console.error inside suites — plus a throw-site probe
-   around emit's listener apply). Note the "ext:...:LINE" numbers in guest
-   stacks do NOT map 1:1 to polyfill sources (runtime lowering shifts them),
-   and an `eval at <anonymous>` frame may be any runtime-eval'd script whose
-   name mapping was lost — don't trust the frame label, trust the probes.
+2. STILL OPEN, but now sharply characterized: a vm-context function
+   declaration LEAKS ONTO THE HOST GLOBAL when (and apparently only when) the
+   host global already owns a property of that name. Symptom in the suite:
+   `TypeError: Cannot read properties of undefined (reading 'error')` at
+   `addEventListener`, thrown from deno's process.ts `synchronizeListeners()`
+   -> `globalThis.addEventListener("error", processOnError)` — because
+   `globalThis.addEventListener` is no longer deno's EventTarget method but
+   @edge-runtime/vm's in-context `function addEventListener(type, handler)`,
+   which dereferences `self.__listeners[...]` and finds nothing. ~46 suites;
+   under --runInBand a single edge-environment suite poisons the whole run.
+
+   Minimal in-guest repro (no jest; run inside the seeded project with the
+   harness's `?cmd=` escape hatch):
+
+       const { VM } = require('@edge-runtime/vm/dist/vm.js')
+       const v = new VM({})
+       v.evaluate("zzz_unique = (function(){});")          // does NOT leak
+       v.evaluate("function addEventListener(){ /*...*/ }") // DOES leak
+       // globalThis.addEventListener is now the context's function
+
+   What the instrumented traps show (SRK_EVDBG=1 probes in SANDBOX_GLOBAL's
+   set / with-set / defineProperty traps, plus process.ts and _events.mjs):
+   the with-scope set trap fires exactly once, lands on the sandbox
+   (`ownAfter=true`), and reports the host global NOT yet poisoned
+   (`gPoisoned=false`) — yet the host global IS poisoned immediately
+   afterwards, and stays poisoned. So a SECOND write reaches the host global
+   through a path that is not the proxy's set/defineProperty traps: suspect
+   the sloppy direct-eval function-declaration instantiation inside
+   `EVAL_IN_REALM`'s `with (w) { eval(code) }` (a pre-existing global name
+   resolving to the host global's binding rather than the with-scope), i.e.
+   the vm_hoist decl->assignment rewrite not covering this shape. Ruled out
+   already: jest/jsdom/edge-runtime JS doing the write (no defineProperty or
+   [[Set]] hook ever fires), a Script::Run host-eval escape (probe never
+   fires), and prototype-chain shadowing (`sameGlobal=true ownAEL=true`).
+   Pinning the property non-writable makes all three probe suites pass, which
+   confirms this single write is the whole failure.
+
+   Debugging notes for whoever picks this up: the "ext:...:LINE" numbers in
+   guest stacks do NOT map 1:1 to polyfill sources (runtime lowering shifts
+   them); an `eval at <anonymous>` frame may be any runtime-eval'd script
+   whose name mapping was lost; and jest's console capture swallows
+   console.error inside a failing suite — use `process._rawDebug`.
 
 ## Smaller known items
 
