@@ -1,0 +1,77 @@
+From 16500b0a47d07feeb69ad13f392d0a0718c4a332 Mon Sep 17 00:00:00 2001
+From: turbopack-wasi build <build@turbopack-wasi.invalid>
+Date: Wed, 5 Aug 2026 10:17:28 -0700
+Subject: [PATCH] turbo-persistence: work on strict wasi hosts + build tests
+ for wasm
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Two wasi fixes surfaced by running the crate's own test suite on
+wasm32-wasip1-threads (scripts/wasi-test.sh):
+
+- commit_current fsync'd the database directory (File::open(dir).sync_data()),
+  which is already skipped on Windows. fd_sync on a directory fd is
+  implementation-defined in wasi preview1 and rejected outright by strict hosts
+  (wasmtime -> EBADF), failing every commit. The Node/embedder runtime happened
+  to tolerate it, but that's fragile; skip it on wasm like Windows (wasi
+  durability is the host filesystem's job, not a guest-issued dir fsync).
+
+- target-gate the criterion dev-dep to not(target_family="wasm"): codspeed-
+  criterion-compat hard-errors on wasi via rayon, and benches never run under
+  cargo test, so the test binary couldn't build for wasm at all. Loss-free.
+
+With these, 60/61 turbo-persistence tests pass on wasm (the one failure is an
+allocation-failure in a max-size compaction stress test — the wasm32 4GB
+address-space ceiling, not a logic bug).
+---
+ turbopack/crates/turbo-persistence/Cargo.toml | 8 +++++++-
+ turbopack/crates/turbo-persistence/src/db.rs  | 8 +++++++-
+ 2 files changed, 14 insertions(+), 2 deletions(-)
+
+diff --git a/turbopack/crates/turbo-persistence/Cargo.toml b/turbopack/crates/turbo-persistence/Cargo.toml
+index de892885..9f6abf9f 100644
+--- a/turbopack/crates/turbo-persistence/Cargo.toml
++++ b/turbopack/crates/turbo-persistence/Cargo.toml
+@@ -37,12 +37,18 @@ tracing = { workspace = true }
+ xxhash-rust = { workspace = true }
+ 
+ [dev-dependencies]
+-criterion = { workspace = true }
+ rand = { workspace = true }
+ rayon = { workspace = true }
+ tempfile = { workspace = true }
+ turbo-tasks-malloc = { workspace = true, features = ["custom_allocator"] }
+ 
++# criterion (via codspeed-criterion-compat) hard-errors on wasi because of rayon,
++# and benches don't run on wasm anyway — target-gate it so the crate's tests can
++# build for wasm32-wasip1-threads. The `[[bench]]` below is only built by
++# `cargo bench`, never by `cargo test`, so it needs no gating.
++[target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
++criterion = { workspace = true }
++
+ [[bin]]
+ name = "sst_inspect"
+ path = "src/bin/sst_inspect.rs"
+diff --git a/turbopack/crates/turbo-persistence/src/db.rs b/turbopack/crates/turbo-persistence/src/db.rs
+index 382c87f3..76c90309 100644
+--- a/turbopack/crates/turbo-persistence/src/db.rs
++++ b/turbopack/crates/turbo-persistence/src/db.rs
+@@ -187,7 +187,13 @@ fn commit_current(path: &Path, seq: u32) -> Result<()> {
+     // Skipped on Windows: `sync_data` on a directory handle fails with ERROR_ACCESS_DENIED (the
+     // handle `File::open` returns for a directory has no write access).Apparently metadata changes
+     // are always atomic on windows so this is simply unneeded.
+-    #[cfg(not(windows))]
++    //
++    // Skipped on wasm/wasi for the same reason: `fd_sync` on a directory fd is
++    // implementation-defined in wasi preview1 and rejected outright by strict
++    // hosts (wasmtime returns EBADF), which would fail every commit. wasi's
++    // durability is governed by the host filesystem (OPFS / the embedder), not by
++    // an fsync the guest can't portably issue, so this barrier is a no-op there.
++    #[cfg(not(any(windows, target_family = "wasm")))]
+     File::open(path)
+         .and_then(|dir| dir.sync_data())
+         .context("Failed to sync database directory after updating CURRENT")?;
+-- 
+2.50.1 (Apple Git-155)
+

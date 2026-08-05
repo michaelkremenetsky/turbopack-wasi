@@ -10,3 +10,4 @@ fixtures/*/node_modules/
 fixtures/*/.next/
 vendor-diff/
 fixtures/ci-app/
+.wasi-test-cache/
