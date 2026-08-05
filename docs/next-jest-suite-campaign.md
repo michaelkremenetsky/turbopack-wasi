@@ -46,9 +46,27 @@ falls out — in this repo or in strapkit.
 
 ## Current suite numbers (next@16.3.0, test/unit, 77 suites)
 
-- Best full sweep: 57 suites / 355 tests passing, before the jsdom/edge-runtime
-  environments were installed. With them installed the failures CHANGED SHAPE
-  (see below) — the remaining mass-failures are one strapkit bug, not many.
+- With both vm bugs fixed (below): 72 suites / 555 tests / 112 snapshots
+  passing, 5 suites failing (4-worker run, wall clock ~13s of jest time).
+- Of the 5 remaining failures, 4 were seed gaps, not runtime bugs: the
+  generated standalone package.json was missing @babel/preset-typescript
+  (babel-plugin-next-page-config) and @testing-library/react + jest-dom
+  (next-dynamic, link-warnings, link-without-router). Seed builder fixed,
+  re-run pending.
+- The 5th (web-runtime/next-response, 2 tests) was a real bug: undici's
+  readableStreamClose() treats a double controller.close() as benign by
+  string-matching node's error wording, and deno's 06_streams wording
+  ("ReadableByteStreamController's stream is not in a readable state")
+  doesn't match, so the benign teardown surfaced as a test failure. Fixed
+  strapkit-side by giving the byte controller's close() node's wording
+  ("Invalid state: Controller is already closed" / "Invalid state:
+  ReadableStream is already closed") — would bite real deno running npm
+  undici the same way, so it's an upstream candidate.
+- Historical: best sweep before the vm fixes was 57 suites / 355 tests.
+- vm regression gate after both fixes: the full parallel/test-vm-* node-compat
+  set (98 tests) shows 70 pass / 18 fail / 8 ignore with ZERO regressions —
+  every failure also fails (or is ignored) in real deno 2.9 on linux
+  (node-test-viewer baseline 2026-07-01).
 
 ## The big blocker: deno node:vm under jest (1 of 2 fixed)
 
