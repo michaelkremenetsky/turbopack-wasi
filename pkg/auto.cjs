@@ -38,6 +38,49 @@ if (!globalThis.__nextSwcWasiAuto) {
 
   const SWC_SUFFIX = ['next', 'dist', 'build', 'swc', 'index.js'].join('/');
   const LOG_SUFFIX = ['next', 'dist', 'build', 'output', 'log.js'].join('/');
+  const JT_SUFFIX = ['next', 'dist', 'build', 'swc', 'jest-transformer.js'].join('/');
+
+  // In-place wrap of the jest transformer's createTransformer: await the wasm
+  // init before handing jest a transformer whose process() is sync-only.
+  function wrapJestTransformer(exportsObj) {
+    const origCreate = exportsObj.createTransformer;
+    exportsObj.__nextSwcWasiWrapped = true;
+    exportsObj.createTransformer = async function createTransformer(...args) {
+      try {
+        const loader = require('./loader.cjs');
+        if (typeof loader.ensureInit === 'function' && !loader.ready) {
+          await loader.ensureInit();
+        }
+      } catch (err) {
+        console.error(
+          '[next-swc-wasi] init failed before jest transform, sync loads may race:',
+          (err && err.message) || err
+        );
+      }
+      return origCreate.apply(this, args);
+    };
+  }
+
+  // First-file corner: in a jest worker the transformer module itself can be
+  // the require that ENGAGES this file (via the runtime's pre-eval hook), so
+  // the Module._load patch below never sees that in-flight load. Sweep the
+  // require cache on the next microtask — jest awaits its transformer load,
+  // so this runs before the transformer is used.
+  queueMicrotask(() => {
+    const cache = Module._cache || {};
+    for (const fn of Object.keys(cache)) {
+      const mod = cache[fn];
+      if (
+        fn.endsWith(JT_SUFFIX) &&
+        mod && mod.exports &&
+        typeof mod.exports.createTransformer === 'function' &&
+        !mod.exports.__nextSwcWasiWrapped
+      ) {
+        wrapJestTransformer(mod.exports);
+      }
+    }
+  });
+
   const origLoad = Module._load;
   Module._load = function (request, parent, isMain) {
     const exportsObj = origLoad.apply(this, arguments);
@@ -87,6 +130,30 @@ if (!globalThis.__nextSwcWasiAuto) {
         const cachedLog = Module._cache && Module._cache[logFilename];
         if (cachedLog) cachedLog.exports = wrappedLog;
         return wrappedLog;
+      }
+      return exportsObj;
+    }
+
+    // next's jest transformer runs the SYNC transform (transformSync ->
+    // loadBindingsSync) with no seam to await the wasm init, so a fresh jest
+    // worker races its first transforms against instantiation and dies with
+    // "Failed to load bindings". jest >= 28 awaits an async createTransformer
+    // when loading the transformer module — the one legitimate async moment
+    // before any sync transform — so finish the init there. Wrapping MUTATES
+    // the exports (see wrapJestTransformer) so it also covers the module
+    // instance the microtask sweep below catches.
+    if (
+      typeof exportsObj.createTransformer === 'function' &&
+      !exportsObj.__nextSwcWasiWrapped
+    ) {
+      let jtFilename;
+      try {
+        jtFilename = Module._resolveFilename(request, parent, isMain);
+      } catch {
+        jtFilename = null;
+      }
+      if (typeof jtFilename === 'string' && jtFilename.endsWith(JT_SUFFIX)) {
+        wrapJestTransformer(exportsObj);
       }
       return exportsObj;
     }
