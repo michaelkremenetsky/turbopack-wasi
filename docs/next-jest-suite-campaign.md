@@ -43,32 +43,39 @@ falls out — in this repo or in strapkit.
   environments were installed. With them installed the failures CHANGED SHAPE
   (see below) — the remaining mass-failures are one strapkit bug, not many.
 
-## The one big remaining blocker: deno node:vm under jest
+## The big blocker: deno node:vm under jest (1 of 2 fixed)
 
 jest runs every test file inside `vm` contexts. Two failure signatures, both
-in strapkit's v8-on-wasm sandbox proxy (`v8-149/v8/mod.rs`, SANDBOX_GLOBAL):
+around strapkit's v8-on-wasm sandbox proxy (`v8-149/v8/mod.rs`,
+SANDBOX_GLOBAL):
 
-1. `TypeError: Cannot redefine property: Array` (jsdom + edge-runtime
-   environments, ~10 suites): a script inside the context does
-   `Object.defineProperty(this, 'Array', ...)` (jsdom snapshotting the
-   context's intrinsics onto its window). In real V8 the context global owns
-   fresh CONFIGURABLE intrinsics; in the shim the defineProperty trap forwards
-   to the sandbox/mirror where the define conflicts. Fix lives in the
-   defineProperty/gopd traps' mirroring strategy.
-2. `TypeError: Cannot read properties of undefined (reading 'error')` inside
-   `globalThis.addEventListener("error", ...)` reached from
-   `process.emit('newListener'/'removeListener')` -> process.ts
-   `synchronizeListeners()`, triggered by next's
-   `unhandled-rejection.external.tsx` wrapping process listeners inside the
-   jest sandbox (~46 suites). `listeners` destructured from
-   `self[eventTargetData]` is undefined — the receiver seen by deno's
-   EventTarget method inside the sandbox doesn't carry the event-target data.
-   Same subsystem: symbol-keyed gets/sets through the sandbox proxy.
-
-Repro without jest (probable): contextify a sandbox, run
-`Object.defineProperty(this,'X',{value:1,configurable:false});` twice with
-different values; and inside a context wrap `process.on`, then call
-`process.removeAllListeners('uncaughtException')`.
+1. FIXED (strapkit side, uncommitted there): `TypeError: Cannot redefine
+   property: Array` (~10 suites, jsdom + edge-runtime environments). Root
+   cause, reproduced byte-for-byte in plain node by extracting SANDBOX_GLOBAL
+   + EVAL_IN_REALM out of mod.rs and replaying
+   @edge-runtime/jest-environment's bootstrap: `globalThis.Array = x`
+   (patchInstanceOf) makes OrdinarySet consult the RECEIVER's own descriptor,
+   our gopd trap reports the intrinsic fallback, so OrdinarySet issues a
+   VALUE-ONLY [[DefineOwnProperty]]; the defineProperty trap forwarded that
+   partial descriptor to a fresh define on the sandbox, defaulting
+   writable/enumerable/configurable to FALSE. revealPrimitives' subsequent
+   `Object.defineProperty(this,'Array',{configurable:false,...})` then died
+   with "Cannot redefine". Fix: the defineProperty trap materializes the
+   intrinsic onto the sandbox (writable, non-enumerable, configurable — what
+   a real context global owns) before defining, so native merge semantics
+   apply. Verified in-guest: the redefine signature is gone and the edge
+   environment constructs.
+2. STILL OPEN: `TypeError: Cannot read properties of undefined (reading
+   'error')` at `addEventListener (<anonymous>:29:53)` invoked from
+   process.emit, reached from next's unhandled-rejection.external.tsx wrapping
+   process listeners (~46 suites, all environments; with --runInBand it kills
+   every next-importing suite). Chasing it with SRK_EVDBG=1 instrumentation in
+   deno's _events.mjs (REGISTER/INVOKE probes with _rawDebug — jest's console
+   capture swallows console.error inside suites — plus a throw-site probe
+   around emit's listener apply). Note the "ext:...:LINE" numbers in guest
+   stacks do NOT map 1:1 to polyfill sources (runtime lowering shifts them),
+   and an `eval at <anonymous>` frame may be any runtime-eval'd script whose
+   name mapping was lost — don't trust the frame label, trust the probes.
 
 ## Smaller known items
 
@@ -78,9 +85,13 @@ different values; and inside a context wrap `process.on`, then call
 - `next-swc.test.ts` / `parse-page-static-info.test.ts` call
   `installBindings()` INSIDE the jest sandbox: jest's module registry
   re-evaluates `build/swc/index.js` fresh, outside auto.cjs's require patch,
-  so loadBindings runs unwrapped there and takes the wasm-fallback/download
-  path ("Failed to load SWC binary"). Needs either a sandbox-visible custom
-  bindings path that is already-initialized, or jest moduleNameMapper glue.
+  so loadBindings runs unwrapped there. Addressed (ebb719b, unverified until
+  the vm blocker clears): loader.cjs now keys its init state off
+  `Symbol.for('next-swc-wasi.loaderState')` on globalThis, so a fresh loader
+  instance in another module registry shares the one instantiation and
+  self-grafts synchronously at require time — binding.cjs's ready check then
+  passes inside the sandbox and loadNative succeeds through the env-var
+  custom-bindings path.
 - The auto.cjs log-module warn filter also suppresses the *attempt detail*
   lines when loadBindings fails, which cost debugging time — consider letting
   attempts through when SRK_TURBOPACK_DEBUG is set.
