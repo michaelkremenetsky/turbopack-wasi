@@ -144,13 +144,37 @@ if (IN_POOL_WORKER) {
 
   let initPromise = null;
 
+  // Process-global init state, keyed off globalThis so it is shared across
+  // MODULE REGISTRIES, not just across requires in one registry. jest is the
+  // motivating case: its sandboxed module system re-evaluates this file fresh
+  // per test context (next-swc.test.ts calls installBindings() inside the
+  // sandbox), and a per-module initPromise would mean a second 56MB wasm
+  // instantiation racing the first. Every instance shares one init and grafts
+  // the same surface (raw exports + the pool-owning registerWorkerScheduler
+  // wrapper) onto its own module.exports.
+  const G_KEY = Symbol.for('next-swc-wasi.loaderState');
+  const G = globalThis[G_KEY] || (globalThis[G_KEY] = { initPromise: null, surface: null });
+
+  function applyGraft(exp) {
+    if (!G.surface) return;
+    Object.assign(exp, G.surface.raw, G.surface.overrides);
+    exp.ready = true;
+  }
+
   // Instantiate the wasi binding and graft its exports onto module.exports.
   // Idempotent; resolves true when the binding is live, false on failure
   // (callers fall back to stock next behavior).
   function ensureInit() {
     if (initPromise) return initPromise;
     dbg('ensureInit starting, instance=' + INSTANCE_ID);
-    initPromise = (async () => {
+    if (G.initPromise) {
+      initPromise = G.initPromise.then((ok) => {
+        if (ok) applyGraft(module.exports);
+        return ok;
+      });
+      return initPromise;
+    }
+    G.initPromise = (async () => {
       const path = require('node:path');
       const fs = require('node:fs');
       const { WASI } = require('node:wasi');
@@ -437,9 +461,11 @@ if (IN_POOL_WORKER) {
         dbg('host process bridge registered');
       }
 
-      // Graft the bindings onto THIS module's exports (the CJS cache means
-      // next's loadNative() require of binding.cjs sees the same object).
-      Object.assign(module.exports, raw);
+      // Build the graft surface (raw exports + overrides). applyGraft copies
+      // it onto each loader instance's module.exports -- for THIS instance
+      // right below, and synchronously at require time for any instance a
+      // later module registry (jest sandbox) evaluates after init completed.
+      const overrides = {};
 
       // Wrap registerWorkerScheduler so we create the turbopack-node pool
       // workers ourselves (next's loaderWorkerPool would too, but we need to
@@ -464,7 +490,7 @@ if (IN_POOL_WORKER) {
       }
       if (typeof raw.registerWorkerScheduler === 'function') {
         const bindingPath = path.join(__dirname, 'binding.cjs');
-        module.exports.registerWorkerScheduler = (_creator, _terminator) =>
+        overrides.registerWorkerScheduler = (_creator, _terminator) =>
           raw.registerWorkerScheduler(
             (creation) => {
               const { filename, cwd } = creation.options;
@@ -486,15 +512,23 @@ if (IN_POOL_WORKER) {
             }
           );
       }
-      module.exports.ready = true;
+      G.surface = { raw, overrides };
       return true;
     })().catch((err) => {
       console.error('[next-swc-wasi] init failed, next falls back to stock bindings:', err && err.message || err);
       dbg(err && err.stack);
       return false;
     });
+    initPromise = G.initPromise.then((ok) => {
+      if (ok) applyGraft(module.exports);
+      return ok;
+    });
     return initPromise;
   }
 
   module.exports.ensureInit = ensureInit;
+  // A fresh module instance in a process whose init already finished (jest
+  // sandbox registries) is live synchronously -- binding.cjs's ready check
+  // must pass without anyone awaiting ensureInit on THIS instance.
+  applyGraft(module.exports);
 }
