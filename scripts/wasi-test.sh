@@ -85,18 +85,24 @@ cleanup() { for m in "${_restore[@]:-}"; do [ -n "$m" ] && mv -f "$m" "${m%.wasi
 trap cleanup EXIT
 
 for crate in "$@"; do
-  manifest="$(cargo metadata --no-deps --format-version 1 2>/dev/null \
-    | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{let m=JSON.parse(d).packages.find(p=>p.name==='$crate');process.stdout.write(m?m.manifest_path:'')})" 2>/dev/null)"
-  if [ -n "$manifest" ] && grep -qE '^criterion = ' "$manifest"; then
+  manifest="$VENDOR/turbopack/crates/$crate/Cargo.toml"
+  if [ -f "$manifest" ] && grep -qE '^criterion = ' "$manifest"; then
     cp "$manifest" "$manifest.wasitest-bak"; _restore+=("$manifest.wasitest-bak")
     # drop the criterion dev-dep line and the [[bench]] section (to EOF or next table)
     perl -0pi -e 's/^criterion = .*\n//mg; s/\n\[\[bench\]\]\n(?:(?!\n\[).*\n?)*//g' "$manifest"
   fi
   echo "==> building $crate tests for $TARGET"
+  build_ok=1
   cargo test -p "$crate" --target "$TARGET" --lib --no-run "${CONFIG_ARGS[@]}" 2>&1 \
     | grep -iE "error\[|error:|Finished" || true
-  wasm="$(ls -t "target/$TARGET/debug/deps/${crate//-/_}"-*.wasm 2>/dev/null | head -1)"
-  [ -n "$wasm" ] || { echo "  no test binary built for $crate" >&2; continue; }
+  # `|| true` so a non-building crate (some don't compile for wasm — that's a
+  # finding, not a runner crash) doesn't trip pipefail+set -e on the empty glob.
+  wasm="$(ls -t "target/$TARGET/debug/deps/${crate//-/_}"-*.wasm 2>/dev/null | head -1 || true)"
+  if [ -z "$wasm" ]; then
+    echo "  SKIP $crate: no wasm test binary (did not build for $TARGET)"
+    grand_failures+=("$crate :: <build> — did not compile for wasm32-wasip1-threads")
+    continue
+  fi
 
   mapfile -t tests < <(run_wasm "$wasm" --list --format=terse 2>/dev/null | sed -n 's/: test$//p')
   echo "==> $crate: ${#tests[@]} tests (isolated)"
