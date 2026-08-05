@@ -269,10 +269,23 @@ function instantiatePlugin(base) {
     wasi_unstable: wasiImport,
   });
 
+  // Fail loudly and specifically if this isn't a real SWC plugin, rather than
+  // letting a missing export surface later as a cryptic "undefined is not a
+  // function" mid-transform.
+  const ex = plugin.instance.exports;
+  for (const req of ['memory', '__alloc', '__transform_plugin_process_impl']) {
+    if (ex[req] === undefined) {
+      throw new Error(
+        `swc plugin is missing the '${req}' export — it does not look like a ` +
+          'wasm32-wasip1 SWC plugin (swc_core with feature "ecma_plugin_transform", ' +
+          'crate-type = ["cdylib"]). See docs/swc-plugin-host-bridge.md.',
+      );
+    }
+  }
+
   // Reactor init, then the mandated post-instantiation core-diag call — its
   // host imports (diagnostics) fire here and are forwarded to the guest, exactly
   // as the wasmtime backend does in `Runtime::init`.
-  const ex = plugin.instance.exports;
   if (typeof ex._initialize === 'function') ex._initialize();
   if (typeof ex.__get_transform_plugin_core_pkg_diag === 'function') {
     ex.__get_transform_plugin_core_pkg_diag();

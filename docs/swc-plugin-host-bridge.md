@@ -167,6 +167,26 @@ isolation before wiring it through the whole bridge, run it under the fuel-instr
 wasmtime probe — a healthy plugin returns in tens of thousands of fuel units; a hung one
 traps on fuel exhaustion with the TLS backtrace above.
 
+## Failure handling and limitations
+
+A plugin that panics, traps, or calls `proc_exit` is caught in the driver worker
+and turned into an `OP_ERROR` on the channel, which the guest's `serve()` loop
+raises as a normal `anyhow` error — so the transform fails cleanly rather than
+corrupting the run. A module that isn't a real SWC plugin (missing `memory` /
+`__alloc` / `__transform_plugin_process_impl`, or importing a host function this
+swc_core doesn't provide) fails at instantiation with a specific message instead
+of a cryptic mid-transform crash.
+
+The one failure mode the bridge can *not* bound is a plugin that genuinely
+infinite-loops: the plugin export runs synchronously on the driver worker, and a
+synchronous wasm call has no preemption point, so a spinning plugin blocks the
+worker and the awaiting turbo-tasks thread until the process is killed. Bounding
+it would mean running the plugin in a terminable sub-worker and servicing its
+synchronous host imports across that boundary — a real re-architecture. In
+practice the only spinning plugin we've hit was the wasip1 TLS-destructor
+toolchain bug above, which the pinned toolchain rules out at build time;
+`scripts/test-swc-plugin.sh` is the regression guard.
+
 ## Status
 
 **Done — the bridge runs real transforming plugins end-to-end under V8.**
