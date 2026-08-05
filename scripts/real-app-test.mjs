@@ -265,7 +265,11 @@ const project = await bindings.turbo.createProject(
     nextVersion: process.env.NEXT_FIXTURE_VERSION ?? '16.2.10',
     serverHmr: false,
   },
-  { isShortSession: true }
+  // isShortSession=true -> ReadWriteOnShutdown (flush only at shutdown, which a
+  // hard process.exit skips); set SHORT_SESSION=0 for continuous ReadWrite so the
+  // store persists SST/meta/blob files during compilation. Load-testing the
+  // on-disk store needs ReadWrite to actually exercise the write+compaction path.
+  { isShortSession: process.env.SHORT_SESSION === '0' ? false : true }
 )
 console.error('[app-test] ✅ createProject succeeded')
 
@@ -282,7 +286,64 @@ const { value: entrypoints } = await subscription.next()
 const routes = [...entrypoints.routes.keys()].sort()
 console.error('[app-test] ✅ entrypoints received, routes:', JSON.stringify(routes))
 
-// ---- 5. build one endpoint --------------------------------------------------
+// ---- 5. build endpoints -----------------------------------------------------
+// TEST_ALL_ROUTES=1 compiles many routes in one project session (optionally
+// TEST_ROUTE_LIMIT=N of them, TEST_ROUTE_CONCURRENCY=K at a time). This is the
+// load-test path for the on-disk persistence store: many concurrent
+// writeToDisk() calls drive concurrent turbo-persistence write batches +
+// compaction, which is where the wasi single-writer assertion was suspected to
+// trip. Pair with TURBOPACK_WASI_ALLOW_DISK_STORE=1 and TURBO_ENGINE_IGNORE_DIRTY=1.
+if (process.env.TEST_ALL_ROUTES) {
+  const firstEndpoint = (p) =>
+    [p.htmlEndpoint, p.rscEndpoint, p.endpoint, ...(p.pages ?? []).flatMap((x) => [x.htmlEndpoint, x.rscEndpoint, x.endpoint])].filter(Boolean)[0]
+  let all = routes.map((name) => ({ name, ep: firstEndpoint(entrypoints.routes.get(name)) })).filter((r) => r.ep)
+  const limit = parseInt(process.env.TEST_ROUTE_LIMIT ?? '0') || all.length
+  all = all.slice(0, limit)
+  const concurrency = parseInt(process.env.TEST_ROUTE_CONCURRENCY ?? '8') || 8
+  console.error(`[app-test] TEST_ALL_ROUTES: compiling ${all.length} routes, concurrency ${concurrency}`)
+  let ok = 0, failed = 0, firstError = null
+  const started = Date.now()
+  let idx = 0
+  const worker = async () => {
+    for (;;) {
+      const i = idx++
+      if (i >= all.length) return
+      const { name, ep } = all[i]
+      try {
+        await ep.writeToDisk()
+        ok++
+        if (ok % 20 === 0) console.error(`[app-test]   ...${ok}/${all.length} compiled (${Date.now() - started}ms)`)
+      } catch (e) {
+        failed++
+        const msg = (e && (e.stack || e.message)) || String(e)
+        if (!firstError) firstError = `${name}: ${msg}`
+        console.error(`[app-test] ❌ route ${name} FAILED: ${msg.slice(0, 400)}`)
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: concurrency }, () => worker()))
+  console.error(`[app-test] ALL_ROUTES DONE ok=${ok} failed=${failed} in ${Date.now() - started}ms`)
+  if (firstError) console.error(`[app-test] first error: ${firstError.slice(0, 600)}`)
+  // Graceful shutdown -> stop_and_wait -> SnapshotReason::Stop persists the
+  // turbo-tasks graph to the on-disk store. This is the write+compaction path;
+  // if the wasi store bug is real it surfaces HERE, not during compilation.
+  if (process.env.TEST_SHUTDOWN !== '0' && typeof project.shutdown === 'function') {
+    const st = Date.now()
+    try {
+      await project.shutdown()
+      console.error(`[app-test] ✅ project.shutdown() (store persist) OK in ${Date.now() - st}ms`)
+    } catch (e) {
+      console.error(`[app-test] ❌ project.shutdown() FAILED in ${Date.now() - st}ms: ${((e && (e.stack || e.message)) || String(e)).slice(0, 800)}`)
+      process.exit(6)
+    }
+  } else {
+    console.error(`[app-test] (no project.shutdown available: typeof=${typeof project.shutdown})`)
+  }
+  const pagesNow = globalThis.__wasiMemory ? globalThis.__wasiMemory.buffer.byteLength / 65536 : 0
+  console.error('[app-test] DONE (memory now', pagesNow, 'pages)')
+  process.exit(failed > 0 ? 5 : 0)
+}
+
 const page = entrypoints.routes.get(process.env.TEST_ROUTE ?? '/')
 if (page) {
   console.error('[app-test] route', process.env.TEST_ROUTE ?? '/', 'type:', page.type)

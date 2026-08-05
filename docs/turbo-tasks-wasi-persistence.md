@@ -1,143 +1,128 @@
 # The on-disk turbo-tasks store on wasi
 
-## Where things stand
+## What's actually wrong (root-caused)
 
 Turbopack can persist its turbo-tasks cache to disk (`.next/cache/.../turbopack`)
-so a second `next build` reuses the first one's work. On the
-`wasm32-wasip1-threads` binding that on-disk path is **forced off**: every build
-runs against the in-memory (`noop`) backing store, and the persistent cache is a
-no-op between runs.
+so a second run reuses the first's work. On `wasm32-wasip1(-threads)` that path is
+forced off; every build runs the in-memory (`noop`) store.
 
-The switch is a single `#[cfg(target_os = "wasi")]` block in
-`create_turbo_tasks`, `vendor/next.js/crates/next-napi-bindings/src/next_api/turbopack_ctx.rs:277`.
-It rewrites `persistent_caching` to `false` unless
-`TURBOPACK_WASI_ALLOW_DISK_STORE=1` is set (the escape hatch exists purely so the
-store bug can be reproduced/bisected). Installed by patch `0023`.
+The real reason it was forced off is **not** the write-batch concurrency
+assertion the gate comment blames. Running the on-disk store on wasi at cal.com
+scale (see the repro below) shows it never asserts, never panics, and survives
+concurrent compilation + graceful shutdown. What it does instead is fail to
+persist, silently:
 
-Everything below the switch already builds and links for wasi — `turbo-persistence`
-is 32-bit-clean thanks to patch `0004` (`usize_from_u32`). The gap is **runtime
-correctness of the disk path**, not compilation. The failure mode reported when
-the store was last exercised on wasi (older pre-16.2 layout, commit message on
-`patches-16.1/0017`) was the single-writer assertion tripping and wedging the
-first compile:
+    Persisting failed during shutdown: Unable to commit snapshot
+    Caused by:
+        0: Unable to open meta file 00000044.meta
+        1: Failed to mmap
+        2: platform not supported
 
-    Another write batch is already active (only a single write operation is allowed at a time)
+`turbo-persistence` memory-maps every file it reads back — meta, SST and blob —
+via `memmap2` (`Cargo.toml:25`, `memmap2 = "0.9.5"`). **`memmap2` has no
+`wasm32-wasip1` backend**, so `Mmap::map` returns "platform not supported" the
+moment `commit()` opens the meta file it just wrote to index it. The commit
+returns `Err`, `WriteBatch`'s guard rolls back (`delete_orphan_files` removes
+every file with `seq > seq_before`), and the error is swallowed at
+`turbo-tasks-backend/src/backend/mod.rs:1448`
+(`eprintln!("Persisting failed during shutdown: {err:?}")`). Net result: the
+store directory ends with only a `CURRENT` file at `seq = 0` and zero `.sst` /
+`.meta` / `.blob` data. The cache is write-a-no-op, so the next run restores
+nothing.
 
-## The code map (verified by reading, 16.3 layout)
+This is why the WASI errno trace during shutdown is clean — `memmap2` fails
+internally and issues no (failing) syscall — and why nothing ever crashes: the
+failure is on the read-back-via-mmap step, caught and dropped.
 
-Selection point — `next-napi-bindings/src/next_api/turbopack_ctx.rs`:
-- `create_turbo_tasks` (`259`). The wasi gate is `277-289`; the on-disk arm
-  (`290-319`) calls `turbo_backing_storage(...)` and picks a `StorageMode`
-  (`ReadOnly` if `TURBO_ENGINE_READ_ONLY`, `ReadWriteOnShutdown` for CI/short
-  sessions, else `ReadWrite`); the in-memory arm (`320-329`) uses
-  `noop_backing_storage()` + `storage_mode: None`.
+## The fix
 
-Storage constructors — `turbopack/crates/turbo-tasks-backend/src/lib.rs`:
-- `turbo_backing_storage` (`31`) → `TurboBackingStorage::open_versioned_on_disk`.
-- `noop_backing_storage` (`46`) → `TurboBackingStorage::new_in_memory`.
+Give `turbo-persistence` a non-mmap file backing on targets where `memmap2`
+isn't supported: on wasi, read the whole file into an owned heap buffer
+(`Box<[u8]>` / `Vec<u8>`) instead of mapping it. A boxed slice has a stable
+address for the file's lifetime, so it satisfies the same borrow contract the
+mmap paths rely on (notably `meta_file.rs`'s `FilterRef` `'static` transmute and
+its declared field drop-order), arguably more safely (no unmap window).
 
-The KV store is turbopack's own `turbo-persistence` crate (SST + memmap; **not**
-LMDB/heed — there is no lmdb/heed anywhere). Deps: `memmap2`, `thread_local`,
-`parking_lot`, `dashmap`, `qfilter`, `zerocopy`, `lzzzz`, `postcard`; none are
-target-gated.
+Sites to convert (all in `turbopack/crates/turbo-persistence/src`):
+- `meta_file.rs` — `MetaFile.mmap: Mmap` (`Mmap`/`MmapOptions` at `12`); this is
+  the one that actually fails first (`Unable to open meta file`).
+- `db.rs:610` — blob-file `Mmap::map`.
+- the SST reader's mmap (`static_sorted_file*.rs`).
+- `rc_bytes.rs` / `arc_bytes.rs` — already model a `Backing::Mmap` variant; add /
+  reuse an owned-buffer variant for the wasi path so `RcBytes`/`ArcBytes` can be
+  backed by either.
+- `mmap_helper.rs` — already cfg-gates `advise_mmap_for_persistence` (linux-only,
+  no-op elsewhere); the natural home for a `map_or_read(file) -> FileBacking`
+  helper that is `Mmap::map` off-wasi and `read-to-end` on wasi.
 
-Single-writer guard — `turbopack/crates/turbo-persistence/src/db.rs`:
-- `acquire_write_operation` (`661`) locks `active_write_operation:
-  Mutex<Option<ActiveWriteState>>` (`259`) and bails with "Another … is already
-  active" (`667`) if the slot is still `Some(Active(..))`.
-- `write_batch` (`696`) and `compact` (`1248`) each acquire it; the slot is
-  released by `WriteOperationGuard::drop` (`226`) — `None` on success, rollback +
-  `None`/`Error` on failure.
+Keep it behind `#[cfg(target_family = "wasi")]` (or `not`-mmap-capable) so native
+builds are byte-for-byte unchanged. This is upstreamable: `memmap2` genuinely has
+no wasi backend, and a read-based fallback is the conventional workaround.
 
-Thread-local write state — `turbopack/crates/turbo-persistence/src/write_batch.rs`:
-- `thread_locals: ThreadLocal<SyncUnsafeCell<ThreadLocalState<..>>>` (`88`).
-- `thread_local_state` (`135`) hands out `&mut` from the cell, "only accessed
-  from the current thread".
-- `put`/`delete` (`235`/`249`) obtain that `&mut` and use it; `flush` (`264`,
-  `unsafe`) and `finish` (`325`, `&mut self`) drain every bucket.
+Once persistence lands data, re-run the repro and confirm a second run restores
+(warm cache), then the wasi force-off gate (below) can be removed.
+
+## The gate to remove once fixed
+
+`create_turbo_tasks`, `crates/next-napi-bindings/src/next_api/turbopack_ctx.rs:277-289`
+rewrites `persistent_caching` to `false` on wasi unless
+`TURBOPACK_WASI_ALLOW_DISK_STORE=1`. Its comment (recycled thread ids aliasing a
+`&mut` from a thread-local `SyncUnsafeCell`) is **wrong** — that was never the
+failure; replace it with the mmap explanation when the fallback lands. Installed
+by patch `0023`; the 32-bit build fix that lets the crate compile at all is patch
+`0004` (`usize_from_u32`).
+
+## Code map (verified, 16.3 layout)
+
+- Selection point: `turbopack_ctx.rs:259` `create_turbo_tasks`; on-disk arm
+  `290-319` (`turbo_backing_storage` + `StorageMode`), in-memory arm `320-329`
+  (`noop_backing_storage`).
+- Storage constructors: `turbo-tasks-backend/src/lib.rs:31` / `:46`.
+- Commit + swallowed error: `turbo-tasks-backend/src/kv_backing_storage.rs:316`
+  (`batch.commit().context("Unable to commit snapshot")`),
+  `turbo-tasks-backend/src/backend/mod.rs:1448` (eprintln, not propagated).
+- Snapshot triggers: `backend/mod.rs` `SnapshotReason` (`Stop`, `IdleTimeout`,
+  `RegularSnapshotInterval`, `InitialSnapshotTimeout`) — a hard `process.exit`
+  fires none of them, so a persist test **must** call graceful shutdown.
+- Persist path from JS: `project_shutdown` (`project.rs:841`) →
+  `turbo_tasks().stop_and_wait()` → `SnapshotReason::Stop`.
+- Single-writer guard (the assertion the old hypothesis blamed, never hit):
+  `turbo-persistence/src/db.rs:661` `acquire_write_operation`, message at `:667`.
+- mmap dependency: `turbo-persistence/src/{meta_file,db,rc_bytes,arc_bytes}.rs`,
+  `memmap2` in `Cargo.toml:25`.
 
 Next.js toggle: `experimental.turbopackFileSystemCacheForBuild`
-(`packages/next/src/build/turbopack-build/impl.ts:81`) → napi `ProjectOptions.
-isPersistentCachingEnabled` → `project.rs:609` → the `persistent_caching`
-parameter of `create_turbo_tasks`. Dev uses `isFileSystemCacheEnabledForDev`.
+(`packages/next/src/build/turbopack-build/impl.ts:81`) →
+`ProjectOptions.isPersistentCachingEnabled` → `project.rs:609` →
+`create_turbo_tasks`.
 
-## Why the obvious root cause does not hold up
+## Reproducing (host-side, no browser needed)
 
-The comment on the gate (and the first-pass investigation) blames the
-`SyncUnsafeCell` in `write_batch.rs`: it hands out `&mut` on the assumption that
-thread ids are stable, and the wasi blocking pool churns threads mid-batch, so
-the reasoning goes that a recycled thread id aliases a live `&mut`. Reading the
-actual write path, that mechanism does **not** explain the observed symptom:
+The wasi binding runs under Node's own `WASI` via `scripts/real-app-test.mjs`, so
+the store can be exercised without strapkit. Flags added to the harness for this:
+`TEST_ALL_ROUTES=1` (compile many routes → concurrent write batches),
+`TEST_ROUTE_LIMIT`/`TEST_ROUTE_CONCURRENCY`, `SHORT_SESSION=0` (continuous
+`ReadWrite` instead of `ReadWriteOnShutdown`), and a graceful `project.shutdown()`
+before exit (`TEST_SHUTDOWN=0` to skip) so the `Stop` snapshot actually runs.
 
-1. **The `&mut` never crosses a suspension point.** `put`/`delete` fetch the
-   thread-local state and the collector, mutate them, and return — all
-   synchronous, no `.await`, no `parallel_scheduler` hop in between. A worker
-   thread cannot be parked and recycled in the middle of one `put`, so two live
-   threads never hold `&mut` into the same `SyncUnsafeCell` at once.
-2. **Bucket reuse is sequential, not concurrent.** The `thread_local` crate only
-   recycles a bucket after its owning thread is fully dead, and `finish` (under
-   `&mut self`) drains *every* bucket — so a thread that inherits a dead thread's
-   bucket sees valid, still-to-be-flushed data, not a data race, and nothing is
-   lost.
-3. **The reported symptom is thread-id-independent.** "Another write batch is
-   already active" comes from a single global `Mutex<Option<ActiveWriteState>>`
-   (`db.rs:259`), which has nothing to do with thread ids or the
-   `SyncUnsafeCell`. Thread churn cannot produce that message.
+    cd turbopack-wasi
+    DOTENV_CONFIG_PATH=fixtures/calcom/.env \
+    NEXTAUTH_SECRET=dummy CALENDSO_ENCRYPTION_KEY=$(printf '1%.0s' {1..32}) \
+    TURBOPACK_WASI_ALLOW_DISK_STORE=1 TURBO_ENGINE_IGNORE_DIRTY=1 SHORT_SESSION=0 \
+    TEST_ALL_ROUTES=1 TEST_ROUTE_LIMIT=20 TEST_ROUTE_CONCURRENCY=8 \
+    PROJECT_SUBDIR=apps/web NEXT_FIXTURE_VERSION=16.2.3 \
+      node -r fixtures/calcom/node_modules/dotenv/config.js \
+      scripts/real-app-test.mjs fixtures/calcom
 
-So a patch to `turbo-persistence`'s thread-local handling would very likely be a
-fix for a bug that isn't there — the same trap that the worker-fd investigation
-fell into (a plausible code hypothesis that the runtime contradicted).
+Two flags are load-bearing and easy to miss:
+- `TURBO_ENGINE_IGNORE_DIRTY=1` — turbopack disables the FS cache on a dirty git
+  repo ("File System Cache is disabled") and the fixtures are dirty; without it
+  the on-disk store never engages regardless of `ALLOW_DISK_STORE`.
+- graceful `project.shutdown()` — without it the process hard-exits before any
+  snapshot fires and the store looks empty for the *wrong* reason.
 
-## The candidates that actually fit the symptom
-
-Ranked by how well they explain "single write operation already active",
-**all unverified** pending a repro:
-
-1. **A leaked / not-yet-dropped `WriteOperationGuard`.** If a `write_batch` or
-   `compact` errors and the guard's `Drop` rollback (`delete_orphan_files`,
-   `db.rs:202`) blocks, panics, or the guard is otherwise kept alive on wasi, the
-   slot stays `Active` and the *next* operation bails. This is consistent with
-   "wedges the first compile" — one stuck operation poisons everything after.
-2. **Genuine overlap under the wasi scheduler.** turbo-tasks may schedule a
-   compaction concurrently with (or racing the teardown of) a write batch; on
-   native the interleaving happens not to overlap, on wasi's different task/thread
-   timing it does, tripping the single-writer guard. This is a caller-layer
-   (`turbo-tasks-backend`) concern, not a `turbo-persistence` soundness bug.
-3. **The symptom no longer reproduces at all.** The last data point is from the
-   pre-16.2 layout. Several wasi runtime and scheduler patches have landed since
-   (and the worker/fork bugs that shared the same "wasi threading is different"
-   flavor turned out to be already fixed). The current disk path may simply work,
-   or fail somewhere new.
-
-## Getting ground truth (the repro that gates any fix)
-
-There is no shortcut around actually running the on-disk store on wasi. It is a
-build → install → `next build` campaign, because the binding is loaded from the
-*app's* `node_modules` (`next-swc-wasi`), not baked into strapkit:
-
-1. Build the wasi binding from this repo **with patch 0023 applied** (so the
-   `TURBOPACK_WASI_ALLOW_DISK_STORE` opt-in exists) and make an app install it.
-2. In the app, set `experimental.turbopackFileSystemCacheForBuild: true`.
-3. Run **`next build`** (not `dev` — the build path is where
-   `isPersistentCachingEnabled` flows through) under strapkit with
-   `TURBOPACK_WASI_ALLOW_DISK_STORE=1`. Run it **twice** against a warm
-   `.next/cache` so the second run exercises the read+write path, not just the
-   initial write.
-4. Capture the real error and where it originates. If it's the single-writer
-   assertion, add a backtrace at `db.rs:667` and at `WriteOperationGuard::drop`
-   to see which operation is holding the slot and why it wasn't released.
-
-Only after step 4 is the fix knowable. If it is candidate 1, the fix is in the
-guard/rollback path (make `Drop` release the slot even when rollback fails, which
-it half-does via `ActiveWriteState::Error` — check that path on wasi). If it is
-candidate 2, the fix is serializing compaction vs. write-batch in the backend
-caller. If it is candidate 3, delete the gate and flip the default.
-
-## Recommendation
-
-Leave the gate as-is (in-memory forced, env opt-in) until the repro exists — it
-is the honest posture, and flipping it blind would ship an unverified behavior
-change. When the repro is run, **also correct the gate comment in
-`turbopack_ctx.rs`**: its current "recycled thread ids alias a live `&mut`"
-explanation is not supported by the write path and should be replaced with
-whatever the repro actually shows.
+Ground truth observed (Aug 2026, `index.wasm32-wasi.wasm` 85 MB): 3× 40-route
+concurrent runs compiled clean (`ok=40 failed=0`, no assertion), and the
+`Stop`-snapshot persist failed with the mmap error above, leaving `CURRENT` at
+`seq = 0`. After a fix, the same command's store dir should contain `.sst` /
+`.meta` files and a `CURRENT` at `seq > 0`, and a second run should restore.
