@@ -30,6 +30,16 @@ const {
   Worker,
 } = require('node:worker_threads');
 
+// Host side of the link-section custom-section protocol (env.read_custom_section).
+// Lives next to this file in the published package; when running from the repo
+// checkout (pkg/ next to scripts/) fall back to the source copy.
+let makeReadCustomSection;
+try {
+  ({ makeReadCustomSection } = require('./wasm-link-sections.cjs'));
+} catch (e) {
+  ({ makeReadCustomSection } = require('../scripts/wasm-link-sections.cjs'));
+}
+
 const DEBUG = !!process.env.SRK_TURBOPACK_DEBUG;
 const dbg = (...args) => { if (DEBUG) console.error('[next-swc-wasi pid=' + process.pid + ']', ...args); };
 
@@ -188,6 +198,14 @@ if (IN_POOL_WORKER) {
             ...importObject.napi,
             ...importObject.emnapi,
             memory: pluginBridgeMemory,
+            // 16.3.0's turbo-tasks registries live in named custom sections and
+            // the guest sizes them through this host import (see
+            // wasm-link-sections.cjs). The napi-generated loaders get it via
+            // inject-read-custom-section.mjs; this hand-written instantiation
+            // needs it wired the same way. Harmless on pre-16.3 modules that
+            // don't import it. The memory getter returns the imported memory —
+            // that IS the instance's linear memory.
+            read_custom_section: makeReadCustomSection(bytes, () => pluginBridgeMemory),
           };
           return importObject;
         },
