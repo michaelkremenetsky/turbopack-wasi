@@ -41,10 +41,9 @@ if (!globalThis.__nextSwcWasiAuto) {
   const origLoad = Module._load;
   Module._load = function (request, parent, isMain) {
     const exportsObj = origLoad.apply(this, arguments);
-    // Cheap gates before any resolution work: every specifier for the swc
-    // module mentions "swc" ("./swc", "../../build/swc",
-    // "next/dist/build/swc"); every specifier for the log module mentions
-    // "log" ("../output/log", "next/dist/build/output/log").
+    // Cheap gates before any resolution work. The log module can gate on its
+    // specifier (every one mentions "log"); the swc module CANNOT — see the
+    // exports-shape gate below.
     if (typeof request !== 'string' || exportsObj === null || typeof exportsObj !== 'object') {
       return exportsObj;
     }
@@ -92,8 +91,13 @@ if (!globalThis.__nextSwcWasiAuto) {
       return exportsObj;
     }
 
+    // No request-string gate here: the specifier for the swc module is NOT
+    // guaranteed to mention "swc" — install-bindings.ts (the path every build
+    // worker process takes) requires it as plain './index', which a
+    // request.indexOf('swc') gate silently skips, leaving loadBindings
+    // unwrapped exactly where the async init matters most. The exports-shape
+    // check is nearly as cheap and can't be fooled by the specifier.
     if (
-      request.indexOf('swc') === -1 ||
       typeof exportsObj.loadBindings !== 'function' ||
       exportsObj.__nextSwcWasiWrapped
     ) {
@@ -114,6 +118,9 @@ if (!globalThis.__nextSwcWasiAuto) {
         if (prop === '__nextSwcWasiWrapped') return true;
         if (prop === 'loadBindings') {
           return async function loadBindings() {
+            if (process.env.SRK_TURBOPACK_DEBUG) {
+              console.error('[next-swc-wasi pid=' + process.pid + '] wrapped loadBindings called');
+            }
             try {
               const loader = require('./loader.cjs');
               if (typeof loader.ensureInit === 'function' || loader.ready) {
@@ -134,6 +141,9 @@ if (!globalThis.__nextSwcWasiAuto) {
     });
     const cached = Module._cache && Module._cache[filename];
     if (cached) cached.exports = wrapped;
+    if (process.env.SRK_TURBOPACK_DEBUG) {
+      console.error('[next-swc-wasi pid=' + process.pid + '] loadBindings wrap installed for ' + filename);
+    }
     return wrapped;
   };
 }

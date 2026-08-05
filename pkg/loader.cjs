@@ -42,6 +42,11 @@ try {
 
 const DEBUG = !!process.env.SRK_TURBOPACK_DEBUG;
 const dbg = (...args) => { if (DEBUG) console.error('[next-swc-wasi pid=' + process.pid + ']', ...args); };
+// Debug tag telling module INSTANCES apart: the same file evaluated twice in
+// one process means two initPromises and two wasm instantiations — exactly the
+// double-init class of bug — and pid alone can't show it.
+const INSTANCE_ID = Math.random().toString(36).slice(2, 8);
+dbg('loader module evaluated, instance=' + INSTANCE_ID, 'file=' + __filename, 'isMainThread=' + isMainThread);
 
 const IN_POOL_WORKER =
   !isMainThread && workerData && typeof workerData === 'object' && 'bindingPath' in workerData;
@@ -144,6 +149,7 @@ if (IN_POOL_WORKER) {
   // (callers fall back to stock next behavior).
   function ensureInit() {
     if (initPromise) return initPromise;
+    dbg('ensureInit starting, instance=' + INSTANCE_ID);
     initPromise = (async () => {
       const path = require('node:path');
       const fs = require('node:fs');

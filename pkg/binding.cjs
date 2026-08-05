@@ -18,6 +18,10 @@
 const { isMainThread } = require('node:worker_threads');
 const loader = require('./loader.cjs');
 if (isMainThread && !loader.ready) {
+  if (process.env.SRK_TURBOPACK_DEBUG) {
+    console.error('[next-swc-wasi pid=' + process.pid + '] binding.cjs required while not ready;'
+      + ' resolved loader=' + require.resolve('./loader.cjs'));
+  }
   throw new Error('next-swc-wasi bindings not initialized yet (ensureInit pending or failed)');
 }
 module.exports = loader;
