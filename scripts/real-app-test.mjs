@@ -269,7 +269,13 @@ const project = await bindings.turbo.createProject(
   // hard process.exit skips); set SHORT_SESSION=0 for continuous ReadWrite so the
   // store persists SST/meta/blob files during compilation. Load-testing the
   // on-disk store needs ReadWrite to actually exercise the write+compaction path.
-  { isShortSession: process.env.SHORT_SESSION === '0' ? false : true }
+  // TEST_MEM_EVICTION=Auto|Full enables memory eviction (needs persistent caching
+  // on — eviction spills in-memory tasks to the backing store, bounding the wasm32
+  // 4GB linear-memory footprint on large apps).
+  {
+    isShortSession: process.env.SHORT_SESSION === '0' ? false : true,
+    ...(process.env.TEST_MEM_EVICTION ? { turbopackMemoryEviction: process.env.TEST_MEM_EVICTION } : {}),
+  }
 )
 console.error('[app-test] ✅ createProject succeeded')
 
