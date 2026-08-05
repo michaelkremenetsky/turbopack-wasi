@@ -46,23 +46,26 @@ falls out — in this repo or in strapkit.
 
 ## Current suite numbers (next@16.3.0, test/unit, 77 suites)
 
-- With both vm bugs fixed (below): 72 suites / 555 tests / 112 snapshots
-  passing, 5 suites failing (4-worker run, wall clock ~13s of jest time).
-- Of the 5 remaining failures, 4 were seed gaps, not runtime bugs: the
-  generated standalone package.json was missing @babel/preset-typescript
-  (babel-plugin-next-page-config) and @testing-library/react + jest-dom
-  (next-dynamic, link-warnings, link-without-router). Seed builder fixed,
-  re-run pending.
-- The 5th (web-runtime/next-response, 2 tests) was a real bug: undici's
-  readableStreamClose() treats a double controller.close() as benign by
-  string-matching node's error wording, and deno's 06_streams wording
-  ("ReadableByteStreamController's stream is not in a readable state")
-  doesn't match, so the benign teardown surfaced as a test failure. Fixed
-  strapkit-side by giving the byte controller's close() node's wording
-  ("Invalid state: Controller is already closed" / "Invalid state:
-  ReadableStream is already closed") — would bite real deno running npm
-  undici the same way, so it's an upstream candidate.
-- Historical: best sweep before the vm fixes was 57 suites / 355 tests.
+- ALL GREEN: 77/77 suites, 563 passed / 1 skipped of 564 tests, 112/112
+  snapshots, jest exit 0 (4-worker in-guest run).
+- Getting from 72 to 77 took two seed fixes and one runtime fix:
+  - Seed gaps (4 suites): the generated standalone package.json was missing
+    @babel/preset-typescript (babel-plugin-next-page-config) and
+    @testing-library/react + jest-dom (next-dynamic, link-warnings,
+    link-without-router). Note @testing-library/react must be 16.x — the
+    monorepo pins 15.x under pnpm, which ignores its react-18-only peer
+    range; plain npm against react 19 ERESOLVEs on it.
+  - web-runtime/next-response (2 tests) was a real bug: undici's
+    readableStreamClose() treats a double controller.close() as benign by
+    string-matching node's error wording, and deno's 06_streams wording
+    ("ReadableByteStreamController's stream is not in a readable state")
+    doesn't match, so the benign teardown surfaced as a test failure. Fixed
+    strapkit-side by giving the byte controller's close() node's wording
+    ("Invalid state: Controller is already closed" / "Invalid state:
+    ReadableStream is already closed") — would bite real deno running npm
+    undici the same way, so it's an upstream candidate.
+- Historical: best sweep before the vm fixes was 57 suites / 355 tests; the
+  vm fixes alone got it to 72 suites / 555 tests.
 - vm regression gate after both fixes: the full parallel/test-vm-* node-compat
   set (98 tests) shows 70 pass / 18 fail / 8 ignore with ZERO regressions —
   every failure also fails (or is ignored) in real deno 2.9 on linux
