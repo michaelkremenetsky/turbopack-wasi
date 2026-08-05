@@ -1,0 +1,102 @@
+From 18fca984d64e548e822e71adfd48aa0cc77d78f5 Mon Sep 17 00:00:00 2001
+From: turbopack-wasi build <build@turbopack-wasi.invalid>
+Date: Tue, 4 Aug 2026 17:03:39 -0700
+Subject: [PATCH] turbopack-wasi: log the wasi lockfile/store/watch fallbacks
+ instead of changing behavior silently
+
+The wasi-only fallbacks introduced earlier in the series change semantics
+without saying so, which reads as "a subsystem silently behaves differently
+here". Surface each at its decision point:
+
+- lockfile: debug! that wasi has no file-locking syscall, so the .next
+  lockfile is treated as held without an advisory lock.
+- turbo-tasks store: the on-disk turbo-persistence store still trips
+  write-batch concurrency assertions on wasi (the write path hands out &mut
+  from a thread-local SyncUnsafeCell, sound only while thread ids are not
+  recycled, and the wasi pthread pool churns threads mid-batch). Keep forcing
+  the in-memory store, but warn! when persistent caching was actually
+  requested, and add TURBOPACK_WASI_ALLOW_DISK_STORE=1 to opt back into the
+  on-disk path for reproducing/bisecting the store bug.
+- watcher: trace! when skipping a watch registration for a nonexistent dir on
+  wasi (matching inotify's already-swallowed PathNotFound).
+---
+ crates/next-napi-bindings/src/lockfile.rs     |  9 +++++++-
+ .../src/next_api/turbopack_ctx.rs             | 23 +++++++++++++++----
+ .../crates/turbo-tasks-fs/src/watcher.rs      |  5 ++++
+ 3 files changed, 31 insertions(+), 6 deletions(-)
+
+diff --git a/crates/next-napi-bindings/src/lockfile.rs b/crates/next-napi-bindings/src/lockfile.rs
+index 5eeb8661..fabc3418 100644
+--- a/crates/next-napi-bindings/src/lockfile.rs
++++ b/crates/next-napi-bindings/src/lockfile.rs
+@@ -88,7 +88,14 @@ pub fn lockfile_try_acquire_sync(
+         // namespace, so the cross-process exclusion the advisory lock
+         // provides cannot be violated there anyway.
+         #[cfg(target_os = "wasi")]
+-        let lock_result: Result<(), TryLockError> = Ok(());
++        let lock_result: Result<(), TryLockError> = {
++            tracing::debug!(
++                path = %path,
++                "wasi: no file-locking syscall; treating the .next lockfile as held without \
++                 an advisory lock"
++            );
++            Ok(())
++        };
+         #[cfg(not(target_os = "wasi"))]
+         let lock_result = file.try_lock();
+         match lock_result {
+diff --git a/crates/next-napi-bindings/src/next_api/turbopack_ctx.rs b/crates/next-napi-bindings/src/next_api/turbopack_ctx.rs
+index 3f31986a..26e1a32c 100644
+--- a/crates/next-napi-bindings/src/next_api/turbopack_ctx.rs
++++ b/crates/next-napi-bindings/src/next_api/turbopack_ctx.rs
+@@ -266,13 +266,26 @@ pub fn create_turbo_tasks(
+     skip_compaction: bool,
+     turbopack_memory_eviction: MemoryEvictionMode,
+ ) -> Result<NextTurboTasks> {
+-    // The on-disk persistence store is not functional on wasi (write-batch
+-    // concurrency assertions trip under the worker-thread pool); always run
+-    // the in-memory (noop) backing storage there, whatever the config says.
++    // The on-disk turbo-persistence store currently trips write-batch
++    // concurrency assertions on wasi: its write path hands out `&mut` from a
++    // thread-local `SyncUnsafeCell`, which is only sound while thread ids are
++    // not recycled, and the wasi pthread pool (built with `on_thread_stop` plus
++    // an idle-timing-out blocking pool) churns threads mid-batch. Until that is
++    // hardened, force the in-memory (noop) backing store on wasi. Set
++    // TURBOPACK_WASI_ALLOW_DISK_STORE=1 to opt back into the on-disk path (for
++    // reproducing/bisecting the store bug).
+     #[cfg(target_os = "wasi")]
+     let persistent_caching = {
+-        let _ = persistent_caching;
+-        false
++        if persistent_caching && std::env::var_os("TURBOPACK_WASI_ALLOW_DISK_STORE").is_none() {
++            tracing::warn!(
++                "persistent (on-disk) caching was requested but is not yet supported on \
++                 wasi; falling back to the in-memory store. Set \
++                 TURBOPACK_WASI_ALLOW_DISK_STORE=1 to force the on-disk path."
++            );
++            false
++        } else {
++            persistent_caching
++        }
+     };
+     Ok(if persistent_caching {
+         let describe = cache_describe(next_version);
+diff --git a/turbopack/crates/turbo-tasks-fs/src/watcher.rs b/turbopack/crates/turbo-tasks-fs/src/watcher.rs
+index 5ef7791d..681bf463 100644
+--- a/turbopack/crates/turbo-tasks-fs/src/watcher.rs
++++ b/turbopack/crates/turbo-tasks-fs/src/watcher.rs
+@@ -297,6 +297,11 @@ mod non_recursive_helpers {
+         // this path if it is created later.
+         #[cfg(target_os = "wasi")]
+         if !dir_path.exists() {
++            tracing::trace!(
++                dir = %dir_path.display(),
++                "wasi: skipping watch registration for a nonexistent dir (matches inotify's \
++                 swallowed PathNotFound); parent stays watched"
++            );
+             return Ok(());
+         }
+ 
+-- 
+2.50.1 (Apple Git-155)
+

@@ -1,0 +1,752 @@
+From 3ceb996bc7b9b2edd7881b29ecb4776d0e6c55ca Mon Sep 17 00:00:00 2001
+From: turbopack-wasi build <build@turbopack-wasi.invalid>
+Date: Tue, 4 Aug 2026 22:02:43 -0700
+Subject: [PATCH] turbopack-wasi: run SWC wasm plugins on the embedder's
+ WebAssembly engine
+
+experimental.swcPlugins modules are wasm32-wasip1; the wasmtime plugin backend
+can't run inside the wasm guest (cap-std/wasi-common don't build there), so both
+turbopack-ecmascript-plugins and next-napi-bindings previously swapped in a
+NoopRuntime that hard-errored. Replace that stub with swc-plugin-host-bridge: a
+Runtime/Instance/Caller implementation that hands the plugin off to a JS driver
+worker owning a real WebAssembly engine, rendezvousing through a control block in
+the guest's shared linear memory (docs/swc-plugin-host-bridge.md in the outer
+repo). Collapse the two duplicate wasm_noop_runtime.rs copies and add the
+init_swc_plugin_bridge napi export that registers the host callback.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+---
+ Cargo.toml                                    |   1 +
+ crates/next-napi-bindings/Cargo.toml          |   2 +
+ crates/next-napi-bindings/src/lib.rs          |  39 +-
+ crates/next-napi-bindings/src/transform.rs    |   2 +-
+ .../src/wasm_noop_runtime.rs                  |  44 --
+ .../crates/swc-plugin-host-bridge/Cargo.toml  |  20 +
+ .../crates/swc-plugin-host-bridge/src/lib.rs  | 433 ++++++++++++++++++
+ .../turbopack-ecmascript-plugins/Cargo.toml   |   6 +-
+ .../turbopack-ecmascript-plugins/src/lib.rs   |   6 -
+ .../transform/swc_ecma_transform_plugins.rs   |   4 +-
+ .../src/wasm_noop_runtime.rs                  |  45 --
+ 11 files changed, 498 insertions(+), 104 deletions(-)
+ delete mode 100644 crates/next-napi-bindings/src/wasm_noop_runtime.rs
+ create mode 100644 turbopack/crates/swc-plugin-host-bridge/Cargo.toml
+ create mode 100644 turbopack/crates/swc-plugin-host-bridge/src/lib.rs
+ delete mode 100644 turbopack/crates/turbopack-ecmascript-plugins/src/wasm_noop_runtime.rs
+
+diff --git a/Cargo.toml b/Cargo.toml
+index dbbf658e..d6b75d26 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -195,6 +195,7 @@ turbopack-browser = { path = "turbopack/crates/turbopack-browser" }
+ turbopack-dev-server = { path = "turbopack/crates/turbopack-dev-server" }
+ turbopack-ecmascript = { path = "turbopack/crates/turbopack-ecmascript" }
+ turbopack-ecmascript-plugins = { path = "turbopack/crates/turbopack-ecmascript-plugins", default-features = false }
++swc-plugin-host-bridge = { path = "turbopack/crates/swc-plugin-host-bridge" }
+ turbopack-ecmascript-runtime = { path = "turbopack/crates/turbopack-ecmascript-runtime" }
+ turbopack-ecmascript-hmr-protocol = { path = "turbopack/crates/turbopack-ecmascript-hmr-protocol" }
+ turbopack-env = { path = "turbopack/crates/turbopack-env" }
+diff --git a/crates/next-napi-bindings/Cargo.toml b/crates/next-napi-bindings/Cargo.toml
+index 5e75697a..bc296a93 100644
+--- a/crates/next-napi-bindings/Cargo.toml
++++ b/crates/next-napi-bindings/Cargo.toml
+@@ -134,6 +134,8 @@ turbo-tasks = { workspace = true }
+ turbo-tasks-backend = { workspace = true }
+ # for the host fetch bridge (reqwest does not build on wasm)
+ turbo-tasks-fetch = { workspace = true }
++# for the host SWC-plugin bridge (the wasmtime plugin backend does not build on wasm)
++swc-plugin-host-bridge = { workspace = true }
+ turbo-tasks-fs = { workspace = true }
+ turbo-unix-path = { workspace = true }
+ next-api = { workspace = true, default-features = false, features = ["worker_pool"] }
+diff --git a/crates/next-napi-bindings/src/lib.rs b/crates/next-napi-bindings/src/lib.rs
+index 21d0d751..625c19ca 100644
+--- a/crates/next-napi-bindings/src/lib.rs
++++ b/crates/next-napi-bindings/src/lib.rs
+@@ -54,11 +54,6 @@ pub mod react_compiler;
+ pub mod rspack;
+ pub mod transform;
+ 
+-// On wasm host targets the wasmtime plugin backend is dropped (it can't run
+-// inside a wasm guest and won't build for wasi); this provides the stub
+-// runtime that stands in for it. See `wasm_noop_runtime` for the rationale.
+-#[cfg(target_family = "wasm")]
+-pub mod wasm_noop_runtime;
+ #[cfg(not(target_arch = "wasm32"))]
+ pub mod turbo_trace_server;
+ pub mod turbopack;
+@@ -205,6 +200,40 @@ pub fn init_turbopack_fetch_bridge(env: Env, handler: JsFunction) -> napi::Resul
+     Ok(())
+ }
+ 
++/// Registers the host SWC-plugin driver for `swc-plugin-host-bridge`. The embedded wasmtime plugin
++/// backend can't run inside a wasm guest, so `experimental.swcPlugins` modules are executed by the
++/// embedder's own WebAssembly engine instead. The handler is invoked (fire-and-forget) with the
++/// address of a control block in the guest's shared linear memory; the JS driver worker then
++/// services that channel — instantiating the plugin and forwarding its host imports back to the
++/// guest's swc closures. See `docs/swc-plugin-host-bridge.md`. First registration wins.
++#[cfg(target_arch = "wasm32")]
++#[napi_derive::napi(ts_args_type = "handler: (channelAddr: number) => void")]
++pub fn init_swc_plugin_bridge(env: Env, handler: JsFunction) -> napi::Result<()> {
++    use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
++
++    let mut tsfn: ThreadsafeFunction<u32> = handler.create_threadsafe_function(0, |ctx| {
++        Ok(vec![ctx.env.create_uint32(ctx.value)?.into_unknown()])
++    })?;
++    // Don't keep the Node.js event loop alive for the bridge (matches the fetch bridge).
++    let _ = tsfn.unref(&env);
++
++    struct HostPluginBridge {
++        tsfn: ThreadsafeFunction<u32>,
++    }
++    impl swc_plugin_host_bridge::SwcPluginHost for HostPluginBridge {
++        fn signal(&self, channel_addr: u32) {
++            // Wake the driver worker to start servicing this channel. Non-blocking:
++            // the guest thread rendezvouses with the worker through the channel's
++            // atomics after this returns.
++            self.tsfn
++                .call(Ok(channel_addr), ThreadsafeFunctionCallMode::NonBlocking);
++        }
++    }
++
++    swc_plugin_host_bridge::set_swc_plugin_host(Box::new(HostPluginBridge { tsfn }));
++    Ok(())
++}
++
+ /// Probe: resolves after `ms` via tokio::time::sleep on the installed runtime. If this never
+ /// resolves, the tokio time driver is not working on this host.
+ #[cfg(target_arch = "wasm32")]
+diff --git a/crates/next-napi-bindings/src/transform.rs b/crates/next-napi-bindings/src/transform.rs
+index b9c53031..2ca1bbaa 100644
+--- a/crates/next-napi-bindings/src/transform.rs
++++ b/crates/next-napi-bindings/src/transform.rs
+@@ -48,7 +48,7 @@ use swc_core::{
+ #[cfg(not(target_family = "wasm"))]
+ use swc_plugin_backend_wasmtime::WasmtimeRuntime;
+ #[cfg(target_family = "wasm")]
+-use crate::wasm_noop_runtime::NoopRuntime as WasmtimeRuntime;
++use swc_plugin_host_bridge::HostBridgeRuntime as WasmtimeRuntime;
+ 
+ use crate::{complete_output, get_compiler, util::MapErr};
+ 
+diff --git a/crates/next-napi-bindings/src/wasm_noop_runtime.rs b/crates/next-napi-bindings/src/wasm_noop_runtime.rs
+deleted file mode 100644
+index 7fc33247..00000000
+--- a/crates/next-napi-bindings/src/wasm_noop_runtime.rs
++++ /dev/null
+@@ -1,44 +0,0 @@
+-//! A no-op SWC plugin runtime for `wasm` host targets.
+-//!
+-//! SWC transform plugins are themselves WebAssembly modules, executed by an
+-//! embedded wasm runtime (`swc_plugin_backend_wasmtime`, i.e. wasmtime). That
+-//! backend cannot run inside a wasm guest, and it pulls in the
+-//! `cap-std`/`wasi-common` stack, which does not build for
+-//! `wasm32-wasip1-threads`. The transform pipeline still wants a plugin
+-//! runtime to hand to swc, so on wasm we drop the wasmtime backend and swap the
+-//! concrete `WasmtimeRuntime` for this stub.
+-//!
+-//! An app with no configured SWC plugins never reaches the point of executing
+-//! one; actually running a plugin returns a clear error instead of silently
+-//! doing nothing.
+-
+-use swc_core::plugin_runner::runtime::{Func, Instance, Module, ModuleCache, Runtime};
+-
+-#[derive(Debug)]
+-pub struct NoopRuntime;
+-
+-impl Runtime for NoopRuntime {
+-    fn identifier(&self) -> &'static str {
+-        "noop-wasm (SWC wasm plugins unsupported on wasm host targets)"
+-    }
+-
+-    fn prepare_module(&self, _bytes: &[u8]) -> anyhow::Result<ModuleCache> {
+-        // Return an opaque placeholder so plugin-module construction succeeds;
+-        // the failure is deferred to `init`, where a plugin would actually run.
+-        Ok(ModuleCache(Box::new(())))
+-    }
+-
+-    fn init(
+-        &self,
+-        _name: &str,
+-        _imports: Vec<(String, Func)>,
+-        _envs: Vec<(String, String)>,
+-        _module: Module,
+-    ) -> anyhow::Result<Box<dyn Instance>> {
+-        anyhow::bail!("SWC wasm transform plugins are not supported on wasm host targets")
+-    }
+-
+-    fn clone_cache(&self, _cache: &ModuleCache) -> Option<ModuleCache> {
+-        Some(ModuleCache(Box::new(())))
+-    }
+-}
+diff --git a/turbopack/crates/swc-plugin-host-bridge/Cargo.toml b/turbopack/crates/swc-plugin-host-bridge/Cargo.toml
+new file mode 100644
+index 00000000..f8c4d4dd
+--- /dev/null
++++ b/turbopack/crates/swc-plugin-host-bridge/Cargo.toml
+@@ -0,0 +1,20 @@
++[package]
++name = "swc-plugin-host-bridge"
++version = "0.1.0"
++description = "Host-driven SWC wasm plugin runtime for wasm host targets"
++license = "MIT"
++edition = "2024"
++autobenches = false
++
++[lib]
++bench = false
++
++[lints]
++workspace = true
++
++[dependencies]
++anyhow = { workspace = true }
++swc_core = { workspace = true, features = [
++  "__plugin_transform_host",
++  "__plugin_transform_host_schema_v1",
++] }
+diff --git a/turbopack/crates/swc-plugin-host-bridge/src/lib.rs b/turbopack/crates/swc-plugin-host-bridge/src/lib.rs
+new file mode 100644
+index 00000000..35817053
+--- /dev/null
++++ b/turbopack/crates/swc-plugin-host-bridge/src/lib.rs
+@@ -0,0 +1,433 @@
++// `memory.atomic.wait32` / `memory.atomic.notify` are still nightly-gated
++// intrinsics; only opt in on the wasm host where they're actually used.
++#![cfg_attr(target_arch = "wasm32", feature(stdarch_wasm_atomic_wait))]
++
++//! A host-driven SWC plugin runtime for wasm host targets.
++//!
++//! SWC transform plugins are themselves WebAssembly modules. Upstream executes
++//! them with an embedded wasmtime engine (`swc_plugin_backend_wasmtime`), which
++//! can't be compiled into a `wasm32-wasip1-threads` guest — there's no nested
++//! JIT, and it drags in the `cap-std`/`wasi-common` stack that doesn't build for
++//! the target. So on a wasm host we hand the plugin module to the *embedder's*
++//! JavaScript runtime, which does have a real `WebAssembly` engine, and act as a
++//! dumb wasm host: the embedder instantiates the plugin and runs its exports,
++//! while every host import the plugin calls is forwarded back, verbatim, to the
++//! unmodified `swc_plugin_runner` closures that live here in the guest. The guest
++//! keeps owning all swc state (the source map, hygiene interner, comment and
++//! result buffers); JavaScript reimplements none of it.
++//!
++//! `swc_plugin_runner::runtime::Instance::transform` is synchronous and runs on a
++//! turbo-tasks worker thread — not on the JS→guest call stack — so there is no
++//! synchronous callback we could ride. Instead the guest thread (`T`) and the
++//! embedder's plugin-driver worker (`P`) rendezvous through a small control block
++//! ([`Channel`]) that lives inside the guest's shared linear memory, ping-ponging
++//! with wasm atomics. `T` never blocks the JS event-loop thread; `P` is a
++//! dedicated worker that is allowed to `Atomics.wait`.
++//!
++//! See `docs/swc-plugin-host-bridge.md` for the full design.
++
++use std::sync::{OnceLock, atomic::{AtomicI32, Ordering}};
++
++use swc_core::plugin_runner::runtime::{Caller, Func, Instance, Module, ModuleCache, Runtime, Value};
++
++/// The embedder-side plugin host. A single implementation is registered once,
++/// at startup, by the napi bridge (`init_swc_plugin_bridge`); mirrors the
++/// register-once `set_wasm_http_client` pattern used by the fetch bridge.
++///
++/// The contract is deliberately tiny: everything about a transform crosses
++/// through the shared-memory [`Channel`]; the host only needs to be told that a
++/// fresh channel is live so its driver worker can start servicing it.
++pub trait SwcPluginHost: Send + Sync {
++    /// Wake the plugin-driver worker to begin servicing the control block at
++    /// `channel_addr` — a byte offset into the shared guest linear memory. Must
++    /// not block: the guest thread rendezvouses with the worker through the
++    /// channel's atomics after this returns. Called once per plugin instance
++    /// (at `init`); every subsequent hand-off is a plain atomic wake.
++    fn signal(&self, channel_addr: u32);
++}
++
++static PLUGIN_HOST: OnceLock<Box<dyn SwcPluginHost>> = OnceLock::new();
++
++/// Register the embedder's plugin host. First writer wins; returns `false` if a
++/// host was already registered (matching `set_wasm_http_client`).
++pub fn set_swc_plugin_host(host: Box<dyn SwcPluginHost>) -> bool {
++    PLUGIN_HOST.set(host).is_ok()
++}
++
++fn plugin_host() -> Option<&'static dyn SwcPluginHost> {
++    PLUGIN_HOST.get().map(|b| &**b)
++}
++
++// ---------------------------------------------------------------------------
++// Control-block protocol
++// ---------------------------------------------------------------------------
++
++// Whose turn it is to act on the channel. The party that is *not* holding the
++// turn is parked in a wasm atomic wait on `Channel::turn`.
++const TURN_P: i32 = 0; // the embedder's plugin-driver worker
++const TURN_T: i32 = 1; // this guest transform thread
++
++// Requests the turn-holder is being asked to perform. Whoever hands off the turn
++// writes `op` first; `op` is only ever read by the party whose turn it becomes,
++// so the P-directed and T-directed values never race even though they share the
++// field. `OP_DONE` answers whatever the previous request was.
++const OP_INIT: i32 = 1; // T→P: instantiate the module, run the core-diag export
++const OP_TRANSFORM: i32 = 2; // T→P: run __transform_plugin_process_impl
++const OP_CLOSE: i32 = 3; // T→P: drop the instance, stop servicing this channel
++const OP_IMPORT: i32 = 10; // P→T: run env import `args[0]` with `args[1..]`
++const OP_CALLER_ALLOC: i32 = 20; // T→P: __alloc(args[0]) in plugin memory
++const OP_CALLER_FREE: i32 = 21; // T→P: __free(args[0], args[1])
++const OP_CALLER_READ: i32 = 22; // T→P: copy plugin[args[0]..] → guest[data_ptr..data_len]
++const OP_CALLER_WRITE: i32 = 23; // T→P: copy guest[data_ptr..data_len] → plugin[args[0]..]
++const OP_DONE: i32 = 30; // either direction: previous request completed, see rets
++const OP_ERROR: i32 = 31; // either direction: request failed (message left in the data buffer)
++
++const N_ARGS: usize = 8;
++const N_RETS: usize = 4;
++
++/// A fixed-layout control block shared between the guest transform thread and the
++/// embedder's plugin-driver worker. Allocated in the guest's shared linear memory
++/// (so its `turn` word is a valid target for `memory.atomic.wait32`) and read by
++/// the worker through a typed-array view over that same memory.
++#[repr(C, align(8))]
++struct Channel {
++    /// Rendezvous word; `TURN_P` / `TURN_T`. Parked party waits on this.
++    turn: AtomicI32,
++    /// The pending request for the current turn-holder (an `OP_*` value).
++    op: AtomicI32,
++    /// Integer arguments passed with a request (import args, alloc size, …).
++    args: [AtomicI32; N_ARGS],
++    /// Integer results returned with `OP_DONE` (import return values, alloc ptr).
++    rets: [AtomicI32; N_RETS],
++    /// Bulk-transfer window: a `[ptr, len]` into *guest* memory that the worker
++    /// copies to/from plugin memory for `OP_CALLER_READ` / `OP_CALLER_WRITE`.
++    data_ptr: AtomicI32,
++    data_len: AtomicI32,
++    /// Plugin module bytes (in guest memory) for the worker to instantiate.
++    module_ptr: AtomicI32,
++    module_len: AtomicI32,
++    /// The plugin's host-import names, '\n'-joined in guest memory, in the exact
++    /// order the guest dispatches them by index. The worker reads this once at
++    /// INIT to build its name→index map for the plugin's `env` import object.
++    names_ptr: AtomicI32,
++    names_len: AtomicI32,
++    /// Transform inputs: the serialized program placed in guest memory, plus the
++    /// unresolved mark and the comments-proxy flag.
++    program_ptr: AtomicI32,
++    program_len: AtomicI32,
++    mark: AtomicI32,
++    comments_proxy: AtomicI32,
++    /// The `u32` that `__transform_plugin_process_impl` returned (0 == ok).
++    result_code: AtomicI32,
++}
++
++impl Channel {
++    fn new() -> Self {
++        // AtomicI32 isn't Copy, so the arrays are built element-by-element.
++        Channel {
++            turn: AtomicI32::new(TURN_T),
++            op: AtomicI32::new(0),
++            args: [(); N_ARGS].map(|_| AtomicI32::new(0)),
++            rets: [(); N_RETS].map(|_| AtomicI32::new(0)),
++            data_ptr: AtomicI32::new(0),
++            data_len: AtomicI32::new(0),
++            module_ptr: AtomicI32::new(0),
++            module_len: AtomicI32::new(0),
++            names_ptr: AtomicI32::new(0),
++            names_len: AtomicI32::new(0),
++            program_ptr: AtomicI32::new(0),
++            program_len: AtomicI32::new(0),
++            mark: AtomicI32::new(0),
++            comments_proxy: AtomicI32::new(0),
++            result_code: AtomicI32::new(0),
++        }
++    }
++
++    fn addr(&self) -> u32 {
++        self as *const Channel as usize as u32
++    }
++}
++
++// --- wasm atomic park/wake -------------------------------------------------
++//
++// Only the guest side (`T`) parks from Rust; the worker (`P`) parks from JS via
++// `Atomics.wait`. Off wasm the bridge is never reached (no host is ever
++// registered), so the primitives are unreachable stubs there.
++
++#[cfg(target_arch = "wasm32")]
++fn park_until(word: &AtomicI32, want: i32) {
++    while word.load(Ordering::Acquire) != want {
++        // -1 == wait forever. Spurious/stale wakeups are handled by the loop.
++        unsafe {
++            core::arch::wasm32::memory_atomic_wait32(word.as_ptr(), word.load(Ordering::Relaxed), -1);
++        }
++    }
++}
++
++#[cfg(target_arch = "wasm32")]
++fn hand_off(word: &AtomicI32, to: i32) {
++    word.store(to, Ordering::Release);
++    unsafe {
++        core::arch::wasm32::memory_atomic_notify(word.as_ptr(), 1);
++    }
++}
++
++#[cfg(not(target_arch = "wasm32"))]
++fn park_until(_word: &AtomicI32, _want: i32) {
++    unreachable!("swc-plugin-host-bridge is only wired on wasm host targets")
++}
++
++#[cfg(not(target_arch = "wasm32"))]
++fn hand_off(_word: &AtomicI32, _to: i32) {
++    unreachable!("swc-plugin-host-bridge is only wired on wasm host targets")
++}
++
++// ---------------------------------------------------------------------------
++// Runtime
++// ---------------------------------------------------------------------------
++
++#[derive(Debug)]
++pub struct HostBridgeRuntime;
++
++impl Runtime for HostBridgeRuntime {
++    fn identifier(&self) -> &'static str {
++        "swc-plugin-host-bridge (plugins run in the embedder's WebAssembly engine)"
++    }
++
++    fn prepare_module(&self, bytes: &[u8]) -> anyhow::Result<ModuleCache> {
++        // Nothing to precompile on the guest — the embedder owns the engine.
++        // Stash the raw bytes so `init` can hand them across the channel.
++        Ok(ModuleCache(Box::new(bytes.to_vec())))
++    }
++
++    fn clone_cache(&self, cache: &ModuleCache) -> Option<ModuleCache> {
++        let bytes: &Vec<u8> = cache.0.downcast_ref()?;
++        Some(ModuleCache(Box::new(bytes.clone())))
++    }
++
++    fn init(
++        &self,
++        _name: &str,
++        imports: Vec<(String, Func)>,
++        _envs: Vec<(String, String)>,
++        module: Module,
++    ) -> anyhow::Result<Box<dyn Instance>> {
++        let Some(host) = plugin_host() else {
++            anyhow::bail!(
++                "no SWC plugin host is registered: this wasm build runs \
++                 experimental.swcPlugins through the embedder's WebAssembly engine, but the \
++                 embedder never called init_swc_plugin_bridge. See \
++                 docs/swc-plugin-host-bridge.md."
++            );
++        };
++
++        let module_bytes: Vec<u8> = match module {
++            Module::Cache(cache) => *cache
++                .0
++                .downcast::<Vec<u8>>()
++                .map_err(|_| anyhow::anyhow!("unexpected module cache type for host bridge"))?,
++            Module::Bytes(bytes) => bytes.into_vec(),
++        };
++
++        // Import names (in order) go to the worker so it can build the plugin's
++        // `env` import object; the closures stay here and are dispatched by index.
++        let names_blob = imports
++            .iter()
++            .map(|(n, _)| n.as_str())
++            .collect::<Vec<_>>()
++            .join("\n")
++            .into_bytes();
++        let import_fns: Vec<Func> = imports.into_iter().map(|(_, f)| f).collect();
++
++        let mut instance = Box::new(HostBridgeInstance {
++            channel: Box::new(Channel::new()),
++            module_bytes,
++            import_fns,
++            names_blob,
++            started: false,
++        });
++        instance.start(host)?;
++        Ok(instance)
++    }
++}
++
++// ---------------------------------------------------------------------------
++// Instance
++// ---------------------------------------------------------------------------
++
++struct HostBridgeInstance {
++    // Boxed so its address is stable across moves — the worker holds this address.
++    channel: Box<Channel>,
++    module_bytes: Vec<u8>,
++    import_fns: Vec<Func>,
++    // The host-import names, '\n'-joined, handed to the driver worker at INIT so it
++    // can build the plugin's `env` object; the matching closures in `import_fns`
++    // are dispatched by index. Owned here so its pointer stays valid for the worker.
++    names_blob: Vec<u8>,
++    started: bool,
++}
++
++// The channel is only touched by the owning transform thread and the worker,
++// strictly alternating via `turn`; the raw pointers never alias live Rust refs
++// across the boundary.
++unsafe impl Send for HostBridgeInstance {}
++unsafe impl Sync for HostBridgeInstance {}
++
++impl HostBridgeInstance {
++    /// Kick off the worker for this channel and run the `OP_INIT` handshake
++    /// (instantiate + `__get_transform_plugin_core_pkg_diag`, whose diagnostics
++    /// come back through the normal import path).
++    fn start(&mut self, host: &'static dyn SwcPluginHost) -> anyhow::Result<()> {
++        let ch = &*self.channel;
++        ch.module_ptr.store(self.module_bytes.as_ptr() as usize as i32, Ordering::Relaxed);
++        ch.module_len.store(self.module_bytes.len() as i32, Ordering::Relaxed);
++        ch.names_ptr.store(self.names_blob.as_ptr() as usize as i32, Ordering::Relaxed);
++        ch.names_len.store(self.names_blob.len() as i32, Ordering::Relaxed);
++        ch.op.store(OP_INIT, Ordering::Relaxed);
++        // The very first hand-off needs the worker pointed at this channel.
++        host.signal(ch.addr());
++        hand_off(&ch.turn, TURN_P);
++        self.serve()?;
++        self.started = true;
++        Ok(())
++    }
++
++    /// Run the guest half of the coroutine until the worker reports the current
++    /// top-level request (`OP_INIT` / `OP_TRANSFORM`) done. While it runs, the
++    /// worker may call back with `OP_IMPORT`; each import is dispatched to its
++    /// guest closure and answered before the loop parks again.
++    fn serve(&self) -> anyhow::Result<()> {
++        let ch = &*self.channel;
++        loop {
++            park_until(&ch.turn, TURN_T);
++            match ch.op.load(Ordering::Acquire) {
++                OP_DONE => return Ok(()),
++                OP_ERROR => anyhow::bail!("plugin host worker reported an error"),
++                OP_IMPORT => {
++                    let idx = ch.args[0].load(Ordering::Relaxed) as usize;
++                    let func = self
++                        .import_fns
++                        .get(idx)
++                        .ok_or_else(|| anyhow::anyhow!("plugin requested unknown import #{idx}"))?;
++                    let (n_args, n_rets) = func.sign;
++                    let mut in_vals = [0 as Value; N_ARGS];
++                    for i in 0..(n_args as usize).min(N_ARGS) {
++                        in_vals[i] = ch.args[i + 1].load(Ordering::Relaxed);
++                    }
++                    let mut out_vals = [0 as Value; N_RETS];
++                    {
++                        let mut caller = HostBridgeCaller { ch };
++                        (func.func)(
++                            &mut caller,
++                            &in_vals[..n_args as usize],
++                            &mut out_vals[..n_rets as usize],
++                        );
++                    }
++                    for i in 0..(n_rets as usize).min(N_RETS) {
++                        ch.rets[i].store(out_vals[i], Ordering::Relaxed);
++                    }
++                    ch.op.store(OP_DONE, Ordering::Release);
++                    hand_off(&ch.turn, TURN_P);
++                }
++                other => anyhow::bail!("unexpected op {other} from plugin host worker"),
++            }
++        }
++    }
++}
++
++impl Instance for HostBridgeInstance {
++    fn transform(
++        &mut self,
++        program_ptr: u32,
++        program_len: u32,
++        unresolved_mark: u32,
++        should_enable_comments_proxy: u32,
++    ) -> anyhow::Result<u32> {
++        let ch = &*self.channel;
++        ch.program_ptr.store(program_ptr as i32, Ordering::Relaxed);
++        ch.program_len.store(program_len as i32, Ordering::Relaxed);
++        ch.mark.store(unresolved_mark as i32, Ordering::Relaxed);
++        ch.comments_proxy
++            .store(should_enable_comments_proxy as i32, Ordering::Relaxed);
++        ch.op.store(OP_TRANSFORM, Ordering::Relaxed);
++        hand_off(&ch.turn, TURN_P);
++        self.serve()?;
++        Ok(ch.result_code.load(Ordering::Acquire) as u32)
++    }
++
++    fn caller(&mut self) -> anyhow::Result<Box<dyn Caller<'_> + '_>> {
++        Ok(Box::new(HostBridgeCaller { ch: &self.channel }))
++    }
++
++    fn cache(&self) -> Option<ModuleCache> {
++        Some(ModuleCache(Box::new(self.module_bytes.clone())))
++    }
++}
++
++impl Drop for HostBridgeInstance {
++    fn drop(&mut self) {
++        if !self.started {
++            return;
++        }
++        // Tell the worker to drop the plugin instance and stop watching this
++        // channel. Fire-and-forget: we don't wait for an ack on teardown.
++        let ch = &*self.channel;
++        ch.op.store(OP_CLOSE, Ordering::Relaxed);
++        hand_off(&ch.turn, TURN_P);
++    }
++}
++
++// ---------------------------------------------------------------------------
++// Caller — plugin-memory access, serviced by the worker
++// ---------------------------------------------------------------------------
++
++struct HostBridgeCaller<'a> {
++    ch: &'a Channel,
++}
++
++impl<'a> HostBridgeCaller<'a> {
++    /// Issue one `OP_CALLER_*` request to the worker and park until it answers.
++    /// Only ever called while it is the guest's turn (inside an import closure),
++    /// so the worker is parked in its import wait-loop ready to service us.
++    fn request(&self, op: i32) -> anyhow::Result<i32> {
++        self.ch.op.store(op, Ordering::Release);
++        hand_off(&self.ch.turn, TURN_P);
++        park_until(&self.ch.turn, TURN_T);
++        match self.ch.op.load(Ordering::Acquire) {
++            OP_DONE => Ok(self.ch.rets[0].load(Ordering::Relaxed)),
++            OP_ERROR => anyhow::bail!("plugin memory op {op} failed in host worker"),
++            other => anyhow::bail!("unexpected op {other} answering caller request {op}"),
++        }
++    }
++}
++
++impl<'a> Caller<'a> for HostBridgeCaller<'a> {
++    fn read_buf(&self, ptr: u32, buf: &mut [u8]) -> anyhow::Result<()> {
++        // The worker copies plugin[ptr..ptr+len] into our staging window; read it
++        // out of guest memory afterwards.
++        self.ch.args[0].store(ptr as i32, Ordering::Relaxed);
++        self.ch.data_ptr.store(buf.as_ptr() as usize as i32, Ordering::Relaxed);
++        self.ch.data_len.store(buf.len() as i32, Ordering::Relaxed);
++        self.request(OP_CALLER_READ)?;
++        Ok(())
++    }
++
++    fn write_buf(&mut self, ptr: u32, buf: &[u8]) -> anyhow::Result<()> {
++        self.ch.args[0].store(ptr as i32, Ordering::Relaxed);
++        self.ch.data_ptr.store(buf.as_ptr() as usize as i32, Ordering::Relaxed);
++        self.ch.data_len.store(buf.len() as i32, Ordering::Relaxed);
++        self.request(OP_CALLER_WRITE)?;
++        Ok(())
++    }
++
++    fn alloc(&mut self, size: u32) -> anyhow::Result<u32> {
++        self.ch.args[0].store(size as i32, Ordering::Relaxed);
++        Ok(self.request(OP_CALLER_ALLOC)? as u32)
++    }
++
++    fn free(&mut self, ptr: u32, size: u32) -> anyhow::Result<u32> {
++        self.ch.args[0].store(ptr as i32, Ordering::Relaxed);
++        self.ch.args[1].store(size as i32, Ordering::Relaxed);
++        Ok(self.request(OP_CALLER_FREE)? as u32)
++    }
++}
+diff --git a/turbopack/crates/turbopack-ecmascript-plugins/Cargo.toml b/turbopack/crates/turbopack-ecmascript-plugins/Cargo.toml
+index 22ee8b6b..7e086670 100644
+--- a/turbopack/crates/turbopack-ecmascript-plugins/Cargo.toml
++++ b/turbopack/crates/turbopack-ecmascript-plugins/Cargo.toml
+@@ -46,7 +46,11 @@ swc_relay = { workspace = true }
+ 
+ # The wasmtime SWC-plugin backend can't run inside a wasm guest and pulls in
+ # cap-std/wasi-common (which don't build for wasm32-wasip1-threads). On wasm we
+-# swap it for a stub runtime (`wasm_noop_runtime`); everywhere else it's used.
++# swap it for `swc-plugin-host-bridge`, which runs the plugin in the embedder's
++# WebAssembly engine; everywhere else the wasmtime backend is used directly.
+ [target.'cfg(not(target_family = "wasm"))'.dependencies]
+ swc_plugin_backend_wasmtime = { workspace = true }
+ 
++[target.'cfg(target_family = "wasm")'.dependencies]
++swc-plugin-host-bridge = { workspace = true }
++
+diff --git a/turbopack/crates/turbopack-ecmascript-plugins/src/lib.rs b/turbopack/crates/turbopack-ecmascript-plugins/src/lib.rs
+index c2aef18b..72880312 100644
+--- a/turbopack/crates/turbopack-ecmascript-plugins/src/lib.rs
++++ b/turbopack/crates/turbopack-ecmascript-plugins/src/lib.rs
+@@ -2,9 +2,3 @@
+ #![feature(arbitrary_self_types_pointers)]
+ 
+ pub mod transform;
+-
+-// On wasm host targets the wasmtime plugin backend is dropped (it can't run
+-// inside a wasm guest and won't build for wasi); this provides the stub
+-// runtime that stands in for it. See `wasm_noop_runtime` for the rationale.
+-#[cfg(target_family = "wasm")]
+-pub mod wasm_noop_runtime;
+diff --git a/turbopack/crates/turbopack-ecmascript-plugins/src/transform/swc_ecma_transform_plugins.rs b/turbopack/crates/turbopack-ecmascript-plugins/src/transform/swc_ecma_transform_plugins.rs
+index 901411c7..3c66671f 100644
+--- a/turbopack/crates/turbopack-ecmascript-plugins/src/transform/swc_ecma_transform_plugins.rs
++++ b/turbopack/crates/turbopack-ecmascript-plugins/src/transform/swc_ecma_transform_plugins.rs
+@@ -7,7 +7,7 @@ use swc_core::{
+ #[cfg(not(target_family = "wasm"))]
+ use swc_plugin_backend_wasmtime::WasmtimeRuntime;
+ #[cfg(target_family = "wasm")]
+-use crate::wasm_noop_runtime::NoopRuntime as WasmtimeRuntime;
++use swc_plugin_host_bridge::HostBridgeRuntime as WasmtimeRuntime;
+ use turbo_rcstr::{RcStr, rcstr};
+ use turbo_tasks_fs::FileSystemPath;
+ use turbopack_core::issue::{Issue, IssueSeverity, IssueStage, StyledString};
+@@ -122,7 +122,7 @@ impl CustomTransformer for SwcEcmaTransformPluginsTransformer {
+         #[cfg(not(target_family = "wasm"))]
+         use swc_plugin_backend_wasmtime::WasmtimeRuntime;
+         #[cfg(target_family = "wasm")]
+-        use crate::wasm_noop_runtime::NoopRuntime as WasmtimeRuntime;
++        use swc_plugin_host_bridge::HostBridgeRuntime as WasmtimeRuntime;
+         use turbo_tasks::TryJoinIterExt;
+ 
+         let plugins = self
+diff --git a/turbopack/crates/turbopack-ecmascript-plugins/src/wasm_noop_runtime.rs b/turbopack/crates/turbopack-ecmascript-plugins/src/wasm_noop_runtime.rs
+deleted file mode 100644
+index 6054533e..00000000
+--- a/turbopack/crates/turbopack-ecmascript-plugins/src/wasm_noop_runtime.rs
++++ /dev/null
+@@ -1,45 +0,0 @@
+-//! A no-op SWC plugin runtime for `wasm` host targets.
+-//!
+-//! SWC transform plugins are themselves WebAssembly modules, executed by an
+-//! embedded wasm runtime (`swc_plugin_backend_wasmtime`, i.e. wasmtime). That
+-//! backend cannot run inside a wasm guest, and it pulls in the
+-//! `cap-std`/`wasi-common` stack, which does not build for
+-//! `wasm32-wasip1-threads`. Turbopack still wants the plugin *host* types so
+-//! the transform pipeline type-checks, so on wasm we drop the wasmtime backend
+-//! and swap the concrete `WasmtimeRuntime` for this stub.
+-//!
+-//! Constructing and cloning plugin modules keeps working — an app with no
+-//! configured SWC plugins never reaches the point of executing one — while
+-//! actually running a plugin returns a clear error instead of silently doing
+-//! nothing.
+-
+-use swc_core::plugin_runner::runtime::{Func, Instance, Module, ModuleCache, Runtime};
+-
+-#[derive(Debug)]
+-pub struct NoopRuntime;
+-
+-impl Runtime for NoopRuntime {
+-    fn identifier(&self) -> &'static str {
+-        "noop-wasm (SWC wasm plugins unsupported on wasm host targets)"
+-    }
+-
+-    fn prepare_module(&self, _bytes: &[u8]) -> anyhow::Result<ModuleCache> {
+-        // Return an opaque placeholder so plugin-module construction succeeds;
+-        // the failure is deferred to `init`, where a plugin would actually run.
+-        Ok(ModuleCache(Box::new(())))
+-    }
+-
+-    fn init(
+-        &self,
+-        _name: &str,
+-        _imports: Vec<(String, Func)>,
+-        _envs: Vec<(String, String)>,
+-        _module: Module,
+-    ) -> anyhow::Result<Box<dyn Instance>> {
+-        anyhow::bail!("SWC wasm transform plugins are not supported on wasm host targets")
+-    }
+-
+-    fn clone_cache(&self, _cache: &ModuleCache) -> Option<ModuleCache> {
+-        Some(ModuleCache(Box::new(())))
+-    }
+-}
+-- 
+2.50.1 (Apple Git-155)
+

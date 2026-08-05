@@ -1,0 +1,182 @@
+From 26dd733168e2e249990dfbe3ed37a18fb3434df9 Mon Sep 17 00:00:00 2001
+From: turbopack-wasi build <build@turbopack-wasi.invalid>
+Date: Tue, 4 Aug 2026 18:48:32 -0700
+Subject: [PATCH] turbo-tasks-fetch: model the host fetch backend as a
+ WasmHttpClient trait
+
+The wasm fetch path used a bare `Box<dyn Fn(String, Option<String>) -> ...>`
+type alias named `WasmFetchBridge`, registered through `set_wasm_fetch_bridge`.
+That reads as an embedder-specific callback bolted onto the fetch path, which
+is not how a maintainer would design the abstraction.
+
+reqwest can't build on wasm (no sockets on wasm32-wasip1-threads), so the HTTP
+client genuinely has to come from the host -- but that is exactly a pluggable
+backend, not a bridge. Model it as one: a named `WasmHttpClient` trait (the wasm
+analog of the reqwest client the native `client.rs` owns), registered via
+`set_wasm_http_client`. next-napi-bindings implements it over the JS handler's
+threadsafe function (`HostHttpClient`); the napi export stays
+`initTurbopackFetchBridge` so the loader/JS interface is unchanged.
+
+No behavior change -- the same request goes to the same host callback; only the
+Rust-side contract is now a designed trait rather than an anonymous closure.
+---
+ crates/next-napi-bindings/src/lib.rs          | 44 +++++++++++----
+ .../turbo-tasks-fetch/src/client_wasm.rs      | 55 +++++++++++--------
+ turbopack/crates/turbo-tasks-fetch/src/lib.rs |  2 +-
+ 3 files changed, 65 insertions(+), 36 deletions(-)
+
+diff --git a/crates/next-napi-bindings/src/lib.rs b/crates/next-napi-bindings/src/lib.rs
+index 6c5b209d..21d0d751 100644
+--- a/crates/next-napi-bindings/src/lib.rs
++++ b/crates/next-napi-bindings/src/lib.rs
+@@ -169,17 +169,39 @@ pub fn init_turbopack_fetch_bridge(env: Env, handler: JsFunction) -> napi::Resul
+     // other stored callbacks).
+     let _ = tsfn.unref(&env);
+ 
+-    turbo_tasks_fetch::set_wasm_fetch_bridge(Box::new(move |url, user_agent| {
+-        let tsfn = tsfn.clone();
+-        Box::pin(async move {
+-            let promise: Promise<TurbopackFetchBridgeResponse> = tsfn
+-                .call_async(Ok((url, user_agent)))
+-                .await
+-                .map_err(|e| format!("fetch bridge call failed: {e}"))?;
+-            let res = promise.await.map_err(|e| format!("{e}"))?;
+-            Ok((res.status as u16, res.body.to_vec()))
+-        })
+-    }));
++    // The host's HTTP client, implemented over the JS handler's threadsafe
++    // function. This is the wasm side of turbo-tasks-fetch's `WasmHttpClient`
++    // (the analog of the native reqwest client) rather than a bespoke callback.
++    struct HostHttpClient {
++        tsfn: ThreadsafeFunction<(String, Option<String>)>,
++    }
++    impl turbo_tasks_fetch::WasmHttpClient for HostHttpClient {
++        fn get(
++            &self,
++            url: String,
++            user_agent: Option<String>,
++        ) -> std::pin::Pin<
++            Box<
++                dyn std::future::Future<
++                        Output = std::result::Result<(u16, Vec<u8>), String>,
++                    > + Send,
++            >,
++        > {
++            let tsfn = self.tsfn.clone();
++            Box::pin(async move {
++                let promise: Promise<TurbopackFetchBridgeResponse> = tsfn
++                    .call_async(Ok((url, user_agent)))
++                    .await
++                    .map_err(|e| format!("fetch bridge call failed: {e}"))?;
++                let res = promise.await.map_err(|e| format!("{e}"))?;
++                // Pin the error type to String so `?` above propagates the
++                // mapped String errors rather than inferring napi::Error.
++                Ok::<_, String>((res.status as u16, res.body.to_vec()))
++            })
++        }
++    }
++
++    turbo_tasks_fetch::set_wasm_http_client(Box::new(HostHttpClient { tsfn }));
+     Ok(())
+ }
+ 
+diff --git a/turbopack/crates/turbo-tasks-fetch/src/client_wasm.rs b/turbopack/crates/turbo-tasks-fetch/src/client_wasm.rs
+index 15815e93..be357a74 100644
+--- a/turbopack/crates/turbo-tasks-fetch/src/client_wasm.rs
++++ b/turbopack/crates/turbo-tasks-fetch/src/client_wasm.rs
+@@ -7,35 +7,42 @@ use turbopack_core::issue::StyledString;
+ 
+ use crate::{FetchError, FetchErrorKind, FetchResult, HttpResponse, HttpResponseBody};
+ 
+-/// `(status, body)` from a bridged fetch.
++/// `(status, body)` from a host HTTP response.
+ pub type WasmFetchResponse = (u16, Vec<u8>);
+ 
+-/// A host-provided fetch implementation: `(url, user_agent) -> (status, body)`
+-/// or an error string. reqwest does not build on wasm targets, but the napi
+-/// host (Node, a browser runtime) always has an HTTP client of its own, so the
+-/// embedder can register one here (see `next-napi-bindings`'s
+-/// `init_turbopack_fetch_bridge`).
+-pub type WasmFetchBridge = Box<
+-    dyn Fn(
+-            String,
+-            Option<String>,
+-        ) -> Pin<Box<dyn Future<Output = Result<WasmFetchResponse, String>> + Send>>
+-        + Send
+-        + Sync,
+->;
++/// The HTTP client backend Turbopack uses on wasm targets.
++///
++/// `wasm32-wasip1-threads` has no sockets, so the `reqwest` client the native
++/// `client.rs` builds and owns cannot compile here. This trait is its wasm
++/// analog: the embedding host (Node, a browser runtime) always has an HTTP
++/// client of its own and supplies one through it, registered once at startup
++/// via [`set_wasm_http_client`] (`next-napi-bindings` wires it up from JS). Same
++/// role as the native reqwest client, just provided by the host rather than
++/// built in-process -- i.e. a pluggable HTTP backend, not an embedder-specific
++/// bridge bolted onto the fetch path.
++pub trait WasmHttpClient: Send + Sync {
++    /// Perform a GET for `url` with an optional `user-agent`, resolving to
++    /// `(status, body)` or an error string. An error surfaces as a fetch issue
++    /// on the requesting route, exactly like a network error on native.
++    fn get(
++        &self,
++        url: String,
++        user_agent: Option<String>,
++    ) -> Pin<Box<dyn Future<Output = Result<WasmFetchResponse, String>> + Send>>;
++}
+ 
+-static WASM_FETCH_BRIDGE: OnceLock<WasmFetchBridge> = OnceLock::new();
++static WASM_HTTP_CLIENT: OnceLock<Box<dyn WasmHttpClient>> = OnceLock::new();
+ 
+-/// Registers the host fetch implementation. Returns `false` if a bridge was
+-/// already registered (the first one wins).
+-pub fn set_wasm_fetch_bridge(bridge: WasmFetchBridge) -> bool {
+-    WASM_FETCH_BRIDGE.set(bridge).is_ok()
++/// Registers the host's HTTP client backend (see [`WasmHttpClient`]). Returns
++/// `false` if one was already registered; the first registration wins.
++pub fn set_wasm_http_client(client: Box<dyn WasmHttpClient>) -> bool {
++    WASM_HTTP_CLIENT.set(client).is_ok()
+ }
+ 
+ /// WASM `FetchClientConfig`. reqwest does not build on wasm targets, so
+-/// fetches are delegated to the host through the registered
+-/// [`WasmFetchBridge`]; without one, every fetch resolves to a `FetchResult`
+-/// error, which surfaces as an issue rather than a build failure.
++/// fetches are delegated to the host's [`WasmHttpClient`]; without one
++/// registered, every fetch resolves to a `FetchResult` error, which surfaces as
++/// an issue rather than a build failure.
+ #[turbo_tasks::value(shared)]
+ #[derive(Hash)]
+ pub struct FetchClientConfig {
+@@ -71,7 +78,7 @@ impl FetchClientConfig {
+         url: RcStr,
+         user_agent: Option<RcStr>,
+     ) -> Result<Vc<FetchResult>> {
+-        let Some(bridge) = WASM_FETCH_BRIDGE.get() else {
++        let Some(client) = WASM_HTTP_CLIENT.get() else {
+             return Ok(Vc::cell(Err(FetchError {
+                 detail: StyledString::Text(
+                     "HTTP fetching is not supported on WASM targets (no host fetch bridge \
+@@ -85,7 +92,7 @@ impl FetchClientConfig {
+             .resolved_cell())));
+         };
+ 
+-        match bridge(url.to_string(), user_agent.map(|ua| ua.to_string())).await {
++        match client.get(url.to_string(), user_agent.map(|ua| ua.to_string())).await {
+             Ok((status, body)) => Ok(Vc::cell(Ok(HttpResponse {
+                 status,
+                 body: HttpResponseBody(body).resolved_cell(),
+diff --git a/turbopack/crates/turbo-tasks-fetch/src/lib.rs b/turbopack/crates/turbo-tasks-fetch/src/lib.rs
+index 0da6722a..abfcc820 100644
+--- a/turbopack/crates/turbo-tasks-fetch/src/lib.rs
++++ b/turbopack/crates/turbo-tasks-fetch/src/lib.rs
+@@ -20,4 +20,4 @@ pub use crate::{
+     response::{FetchResult, HttpResponse, HttpResponseBody},
+ };
+ #[cfg(target_family = "wasm")]
+-pub use crate::client::{WasmFetchBridge, WasmFetchResponse, set_wasm_fetch_bridge};
++pub use crate::client::{WasmFetchResponse, WasmHttpClient, set_wasm_http_client};
+-- 
+2.50.1 (Apple Git-155)
+

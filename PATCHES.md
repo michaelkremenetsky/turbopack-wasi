@@ -62,10 +62,11 @@ The series, in order:
 | 12 | next-napi-bindings | hold the `.next` dist-dir lockfile unlocked on wasi (there's no file-locking syscall there and `next dev` refused to boot on the `Unsupported` error) |
 | 13 | next-core/next-api/bindings | run on stock configs: accept next's own JS-side default `turbopackPluginRuntimeStrategy: 'childProcesses'` (normalize it to the worker pool) and force the in-memory turbo-tasks store, since the on-disk one is broken on wasi |
 | 14 | turbo-tasks-fs | skip watching nonexistent dirs on wasi. notify's PollWatcher fallback reports them as async Io error events ("watch error" spam + spurious invalidations); inotify's synchronous PathNotFound was already swallowed, so match that |
-| 15 | turbo-tasks-fetch/bindings | host fetch bridge on wasm: `initTurbopackFetchBridge(handler)` lets the loader register a node http client, so `next/font` Google Fonts downloads work. No handler registered keeps the resolve-to-issue behavior from patch 6 |
+| 15 | turbo-tasks-fetch/bindings | host fetch bridge on wasm: `initTurbopackFetchBridge(handler)` lets the loader register a node http client, so `next/font` Google Fonts downloads work. No handler registered keeps the resolve-to-issue behavior from patch 6. (Patch 24 reframes the Rust side as a `WasmHttpClient` trait) |
 
-Patches 16-20 are `patches/`-only (16.3+); they landed with the 16.3.0 rebase
-and the nightly bump that came with it:
+Patches 16-25 are `patches/`-only (16.3+); they landed with the 16.3.0 rebase
+and the nightly bump that came with it, plus the later upstream-acceptability
+pass (23-25):
 
 | # | patch | what / why |
 |---|-------|------------|
@@ -76,6 +77,10 @@ and the nightly bump that came with it:
 | 20 | turbo-tasks-fetch | update the wasm fetch client for the 16.3.0 API: `session_dependent` became a `#[turbo_tasks::function]` flag (was a free `mark_session_dependent()` call), and `FetchClientConfig` grew timeout/retry fields the shared construction site now sets |
 | 21 | next-napi-bindings | make `turbopackMemoryEviction` optional in `NapiTurboEngineOptions` (default `Off`) — it was the one non-`Option` field, and next's createProject omits it when the config option is unset, so projectNew rejected the whole options object. Unused on wasi anyway (persistent caching is forced off) |
 | 22 | next-napi-bindings | resolve a relative dist dir against the project dir (`root_path + project_path`) on wasm. 16.3.0's new eager `create_dir_all(dist_dir)` in projectNew assumes a process cwd (native next runs in the project dir); wasi has none, so `.next` failed with ENOENT. Native path unchanged |
+| 23 | next-napi-bindings, turbo-tasks-fs | stop changing wasi semantics silently: log the lockfile/store/watch fallbacks (patches 11-13) at their decision points — `debug!` on the lockfile bypass, `warn!` when persistent caching was requested but is forced to the in-memory store (with `TURBOPACK_WASI_ALLOW_DISK_STORE=1` to opt back into the on-disk path for repro), `trace!` on a skipped nonexistent-dir watch |
+| 24 | turbo-tasks-fetch, next-napi-bindings | model the host fetch backend as a `WasmHttpClient` trait — the wasm analog of the native reqwest client — instead of a bare `Box<dyn Fn>` "bridge": `set_wasm_http_client` + a `HostHttpClient` impl over the JS handler's threadsafe fn. Reads as a pluggable HTTP backend rather than an embedder callback bolted on. napi export `initTurbopackFetchBridge` unchanged; no behavior change |
+| 25 | next-napi-bindings | make the dev startup file-I/O benchmark robust: `create_dir_all(node_root)` before the probe (node_root may not exist yet at createProject time, so on wasi the temp-file write failed with ENOENT and printed a spurious "Failed to benchmark file I/O" warning every boot — also helps native on a fresh project), and skip the "slow filesystem / network drive" event on wasi where that distinction is meaningless |
+| 26 | turbopack-ecmascript-plugins, swc-plugin-host-bridge, next-napi-bindings | actually run `experimental.swcPlugins` wasm modules, replacing patch 19's `NoopRuntime` hard-error. New `swc-plugin-host-bridge` crate implements swc's `Runtime`/`Instance`/`Caller` by handing the plugin off to a JS driver worker that owns a real WebAssembly engine (the binding has no nested engine), rendezvousing through a control block in the guest's shared linear memory and forwarding the plugin's ~40 host imports back to swc's own closures; `init_swc_plugin_bridge` registers the host callback (same shape as `initTurbopackFetchBridge`). Deletes the two `wasm_noop_runtime.rs` stubs. Pairs with the vendored `swc` fork's un-gated plugin path (wired by apply-patches.sh) and the host-side `pkg/swc-plugin-worker.mjs`. Plugins must be built with rustc ≤ 1.86 — see `docs/swc-plugin-host-bridge.md` for the 1.87+ wasip1 TLS-destructor hang |
 
 About those 16MB stacks in patch 11: not optional. Wasm shadow-stack frames
 run several times larger than native and the 2MB default overflows under
@@ -89,12 +94,13 @@ emnapi, and worker-pool task messages inside turbo-tasks hit this constantly.
 The fork gates on `any(not(target_family = "wasm"), target_feature =
 "atomics")` instead, which is the shape I'd propose upstream.
 
-Still native-only, on purpose: `css` (lightningcss-napi), the turbopack trace
-server, and swc wasm plugins — the last now explicitly, via patch 19's
-`NoopRuntime` (executing a wasm plugin returns an error rather than silently
-no-op'ing; an app with no configured plugins never reaches it). Persistent
-caching compiles but only the in-memory (`noop`) backing store has been
-exercised. Don't trust the on-disk store on wasi yet.
+Still native-only, on purpose: `css` (lightningcss-napi) and the turbopack
+trace server. (SWC wasm plugins were here too: patch 19 first made them an
+explicit `NoopRuntime` error instead of a silent no-op; patch 26 now runs them
+for real on the host's WebAssembly engine, so an app with configured
+`swcPlugins` works rather than erroring.) Persistent caching compiles but only
+the in-memory (`noop`) backing store has been exercised. Don't trust the
+on-disk store on wasi yet.
 
 ## Building
 

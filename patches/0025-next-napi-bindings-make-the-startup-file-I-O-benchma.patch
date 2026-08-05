@@ -1,0 +1,52 @@
+From 3a01fa42109bb34c30ad5dac36217c813a1b2814 Mon Sep 17 00:00:00 2001
+From: turbopack-wasi build <build@turbopack-wasi.invalid>
+Date: Tue, 4 Aug 2026 19:03:51 -0700
+Subject: [PATCH] next-napi-bindings: make the startup file-I/O benchmark
+ robust on wasi
+
+createProject spawns a "slow filesystem" probe in dev that writes a temp file
+into node_root. node_root may not exist yet at that point, so on wasi the
+temp-file create fails with ENOENT and the probe prints a spurious "Failed to
+benchmark file I/O" warning on every startup.
+
+Ensure the directory exists first (`create_dir_all`) so the probe actually
+runs -- a robustness fix that helps native too (a fresh project where node_root
+isn't created yet). Also skip the "Slow filesystem detected / consider moving
+off a network drive" event on wasi, where the local-vs-network-drive distinction
+is meaningless on a host-mounted / OPFS-backed filesystem.
+---
+ crates/next-napi-bindings/src/next_api/project.rs | 11 ++++++++++-
+ 1 file changed, 10 insertions(+), 1 deletion(-)
+
+diff --git a/crates/next-napi-bindings/src/next_api/project.rs b/crates/next-napi-bindings/src/next_api/project.rs
+index 91cf74aa..186a0ef6 100644
+--- a/crates/next-napi-bindings/src/next_api/project.rs
++++ b/crates/next-napi-bindings/src/next_api/project.rs
+@@ -728,6 +728,12 @@ impl CompilationEvent for SlowFilesystemEvent {
+ /// - https://x.com/jarredsumner/status/1637549427677364224
+ /// - https://github.com/oven-sh/bun/blob/06a9aa80c38b08b3148bfeabe560/src/install/install.zig#L3038
+ async fn benchmark_file_io(turbo_tasks: &NextTurboTasks, dir: &Path) -> Result<()> {
++    // `dir` (node_root) may not exist yet at createProject time. On wasi the
++    // temp-file create below then fails with ENOENT and the probe reports a
++    // spurious "Failed to benchmark file I/O" error; on native the dir usually
++    // already exists. Ensure it exists first either way.
++    tokio::fs::create_dir_all(dir).await?;
++
+     let temp_path = dir.join(format!(
+         "tmp_file_io_benchmark_{:x}",
+         rand::random::<u128>()
+@@ -757,7 +763,10 @@ async fn benchmark_file_io(turbo_tasks: &NextTurboTasks, dir: &Path) -> Result<(
+     .await?;
+ 
+     let duration = Instant::now().duration_since(start);
+-    if duration > SLOW_FILESYSTEM_THRESHOLD {
++    // The slow-filesystem warning is about local vs. network drives, which isn't
++    // meaningful on wasi (a host-mounted / OPFS-backed filesystem), so don't
++    // emit it there even if the probe happened to cross the threshold.
++    if duration > SLOW_FILESYSTEM_THRESHOLD && !cfg!(target_os = "wasi") {
+         turbo_tasks.send_compilation_event(Arc::new(SlowFilesystemEvent {
+             directory: dir.to_string_lossy().into(),
+             duration_ms: duration.as_millis(),
+-- 
+2.50.1 (Apple Git-155)
+
