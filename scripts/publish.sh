@@ -80,11 +80,13 @@ cp "$DIST"/index.wasm32-wasi.wasm "$DIST"/index.wasi.cjs "$DIST"/index.wasi-brow
 # must ship with the workers — copy it explicitly and fail loudly if it's absent from the build.
 cp "$DIST"/wasm-link-sections.cjs "$STAGE"/ \
   || { echo "FATAL: $DIST/wasm-link-sections.cjs missing — the wasi workers can't load without it" >&2; exit 1; }
-# The self-contained loader trio (pkg/): auto.cjs (one-require engagement for
+# The self-contained loader set (pkg/): auto.cjs (one-require engagement for
 # host runtimes), binding.cjs (next's custom-bindings entry), loader.cjs (the
-# async instantiation + pool-worker RPC bridge). Version-matched to next by
-# living in this package.
-cp "$ROOT"/pkg/auto.cjs "$ROOT"/pkg/binding.cjs "$ROOT"/pkg/loader.cjs "$STAGE"/
+# async instantiation + pool-worker RPC bridge), jest-transformer.cjs (the
+# init-awaiting wrapper auto.cjs points jest configs at). Version-matched to
+# next by living in this package.
+cp "$ROOT"/pkg/auto.cjs "$ROOT"/pkg/binding.cjs "$ROOT"/pkg/loader.cjs \
+   "$ROOT"/pkg/jest-transformer.cjs "$STAGE"/
 
 cat > "$STAGE/package.json" <<EOF
 {

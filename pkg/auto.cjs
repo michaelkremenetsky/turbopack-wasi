@@ -39,13 +39,21 @@ if (!globalThis.__nextSwcWasiAuto) {
   const SWC_SUFFIX = ['next', 'dist', 'build', 'swc', 'index.js'].join('/');
   const LOG_SUFFIX = ['next', 'dist', 'build', 'output', 'log.js'].join('/');
   const JT_SUFFIX = ['next', 'dist', 'build', 'swc', 'jest-transformer.js'].join('/');
+  const NEXT_JEST_SUFFIX = ['next', 'dist', 'build', 'jest', 'jest.js'].join('/');
 
   // In-place wrap of the jest transformer's createTransformer: await the wasm
   // init before handing jest a transformer whose process() is sync-only.
+  const jtDbg = (...args) => {
+    if (process.env.SRK_TURBOPACK_DEBUG) {
+      console.error('[next-swc-wasi pid=' + process.pid + ' auto]', ...args);
+    }
+  };
   function wrapJestTransformer(exportsObj) {
     const origCreate = exportsObj.createTransformer;
     exportsObj.__nextSwcWasiWrapped = true;
+    jtDbg('jest transformer wrapped');
     exportsObj.createTransformer = async function createTransformer(...args) {
+      jtDbg('createTransformer called; awaiting init');
       try {
         const loader = require('./loader.cjs');
         if (typeof loader.ensureInit === 'function' && !loader.ready) {
@@ -68,6 +76,7 @@ if (!globalThis.__nextSwcWasiAuto) {
   // so this runs before the transformer is used.
   queueMicrotask(() => {
     const cache = Module._cache || {};
+    let hits = 0;
     for (const fn of Object.keys(cache)) {
       const mod = cache[fn];
       if (
@@ -77,17 +86,84 @@ if (!globalThis.__nextSwcWasiAuto) {
         !mod.exports.__nextSwcWasiWrapped
       ) {
         wrapJestTransformer(mod.exports);
+        hits++;
       }
     }
+    jtDbg('engage-time transformer sweep:', hits, 'wrapped;', Object.keys(cache).length, 'cached modules');
   });
 
   const origLoad = Module._load;
   Module._load = function (request, parent, isMain) {
+    if (typeof request === 'string' && request.indexOf('jest-transformer') !== -1) {
+      jtDbg('_load saw jest-transformer request:', request);
+    }
     const exportsObj = origLoad.apply(this, arguments);
     // Cheap gates before any resolution work. The log module can gate on its
     // specifier (every one mentions "log"); the swc module CANNOT — see the
     // exports-shape gate below.
-    if (typeof request !== 'string' || exportsObj === null || typeof exportsObj !== 'object') {
+    if (
+      typeof request !== 'string' ||
+      exportsObj === null ||
+      (typeof exportsObj !== 'object' && typeof exportsObj !== 'function')
+    ) {
+      return exportsObj;
+    }
+
+    // next/jest: rewrite the RESOLVED jest config's transform entries to point
+    // at this package's wrapper transformer (jest-transformer.cjs), which
+    // awaits the wasm init before delegating to next's sync-only transformer.
+    // This runs in the jest MAIN process — the only place interception is
+    // reliable — and reaches the workers through the serialized config, so the
+    // per-worker first-transform race can't happen at all. (The compiled
+    // module's exports IS the nextJest function, with .default self-assigned.)
+    if (
+      typeof exportsObj === 'function' &&
+      request.indexOf('jest') !== -1 &&
+      !exportsObj.__nextSwcWasiWrapped
+    ) {
+      let njFilename;
+      try {
+        njFilename = Module._resolveFilename(request, parent, isMain);
+      } catch {
+        njFilename = null;
+      }
+      if (typeof njFilename === 'string' && njFilename.endsWith(NEXT_JEST_SUFFIX)) {
+        const WRAPPER = path.join(__dirname, 'jest-transformer.cjs');
+        const origFactory = exportsObj;
+        const nextJestWrapped = function nextJest(...fargs) {
+          const createJestConfig = origFactory.apply(this, fargs);
+          return (customConfig) => {
+            const resolver = createJestConfig(customConfig);
+            return async () => {
+              const cfg = await (typeof resolver === 'function' ? resolver() : resolver);
+              try {
+                for (const key of Object.keys((cfg && cfg.transform) || {})) {
+                  const entry = cfg.transform[key];
+                  if (
+                    Array.isArray(entry) &&
+                    typeof entry[0] === 'string' &&
+                    entry[0].endsWith(JT_SUFFIX)
+                  ) {
+                    cfg.transform[key] = [
+                      WRAPPER,
+                      Object.assign({}, entry[1], { __nextJtPath: entry[0] }),
+                    ];
+                    jtDbg('rewrote jest transform entry to wrapper:', key);
+                  }
+                }
+              } catch (err) {
+                jtDbg('jest transform rewrite failed:', (err && err.message) || err);
+              }
+              return cfg;
+            };
+          };
+        };
+        nextJestWrapped.__nextSwcWasiWrapped = true;
+        nextJestWrapped.default = nextJestWrapped;
+        const cachedNj = Module._cache && Module._cache[njFilename];
+        if (cachedNj) cachedNj.exports = nextJestWrapped;
+        return nextJestWrapped;
+      }
       return exportsObj;
     }
 
