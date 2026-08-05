@@ -72,48 +72,53 @@ SANDBOX_GLOBAL):
    a real context global owns) before defining, so native merge semantics
    apply. Verified in-guest: the redefine signature is gone and the edge
    environment constructs.
-2. STILL OPEN, but now sharply characterized: a vm-context function
-   declaration LEAKS ONTO THE HOST GLOBAL when (and apparently only when) the
-   host global already owns a property of that name. Symptom in the suite:
-   `TypeError: Cannot read properties of undefined (reading 'error')` at
+2. FIXED (strapkit side, uncommitted there): every top-level `function f(){}`
+   in a vm script was being instantiated onto the HOST global at
+   `new vm.Script(...)` COMPILE time. Symptom in the suite: `TypeError:
+   Cannot read properties of undefined (reading 'error')` at
    `addEventListener`, thrown from deno's process.ts `synchronizeListeners()`
    -> `globalThis.addEventListener("error", processOnError)` — because
-   `globalThis.addEventListener` is no longer deno's EventTarget method but
-   @edge-runtime/vm's in-context `function addEventListener(type, handler)`,
-   which dereferences `self.__listeners[...]` and finds nothing. ~46 suites;
-   under --runInBand a single edge-environment suite poisons the whole run.
+   `globalThis.addEventListener` had been replaced by @edge-runtime/vm's
+   in-context `function addEventListener(type, handler)`, which dereferences
+   `self.__listeners[...]` and finds nothing. ~46 suites; under --runInBand a
+   single edge-environment suite poisoned the whole run.
 
-   Minimal in-guest repro (no jest; run inside the seeded project with the
-   harness's `?cmd=` escape hatch):
+   Root cause: the shim's compile-time syntax check (`validate_script_src`,
+   v8-149/v8/mod.rs) validated vm-script source with
 
-       const { VM } = require('@edge-runtime/vm/dist/vm.js')
-       const v = new VM({})
-       v.evaluate("zzz_unique = (function(){});")          // does NOT leak
-       v.evaluate("function addEventListener(){ /*...*/ }") // DOES leak
-       // globalThis.addEventListener is now the context's function
+       (0,eval)('throw __srk_never_defined;\n' + src)
 
-   What the instrumented traps show (SRK_EVDBG=1 probes in SANDBOX_GLOBAL's
-   set / with-set / defineProperty traps, plus process.ts and _events.mjs):
-   the with-scope set trap fires exactly once, lands on the sandbox
-   (`ownAfter=true`), and reports the host global NOT yet poisoned
-   (`gPoisoned=false`) — yet the host global IS poisoned immediately
-   afterwards, and stays poisoned. So a SECOND write reaches the host global
-   through a path that is not the proxy's set/defineProperty traps: suspect
-   the sloppy direct-eval function-declaration instantiation inside
-   `EVAL_IN_REALM`'s `with (w) { eval(code) }` (a pre-existing global name
-   resolving to the host global's binding rather than the with-scope), i.e.
-   the vm_hoist decl->assignment rewrite not covering this shape. Ruled out
-   already: jest/jsdom/edge-runtime JS doing the write (no defineProperty or
-   [[Set]] hook ever fires), a Script::Run host-eval escape (probe never
-   fires), and prototype-chain shadowing (`sameGlobal=true ownAEL=true`).
-   Pinning the property non-writable makes all three probe suites pass, which
-   confirms this single write is the whole failure.
+   Sloppy INDIRECT eval runs at host-global scope, and per spec
+   EvalDeclarationInstantiation runs BEFORE the prefixed throw executes — so
+   every top-level function declaration was instantiated through
+   CreateGlobalFunctionBinding on the real global (no proxy, no trap), while
+   plain statements (assignments) never ran. That explains every observation
+   that made this look spooky: declarations leaked as fully compiled
+   functions, assignments didn't, the poison landed BEFORE eval_in_realm's
+   own (correctly sandboxed) evaluation, and no JS-visible set/defineProperty
+   hook ever fired. The earlier "only leaks when the host owns the name"
+   theory was instrumentation bias — a probe watching only addEventListener;
+   fresh names leaked too (`function toString(){}` left an OWN toString on
+   the host global).
 
-   Debugging notes for whoever picks this up: the "ext:...:LINE" numbers in
-   guest stacks do NOT map 1:1 to polyfill sources (runtime lowering shifts
-   them); an `eval at <anonymous>` frame may be any runtime-eval'd script
-   whose name mapping was lost; and jest's console capture swallows
-   console.error inside a failing suite — use `process._rawDebug`.
+   Fix: make the validation eval DIRECT (`eval(...)` inside the helper
+   function instead of `(0,eval)(...)`). Same sloppy script grammar, same
+   engine SyntaxError wording and compile-time timing, but declaration
+   instantiation now targets the helper's own function scope, which is
+   discarded on return. (`validate_fn_body`'s eval-throw is strict-mode and
+   was never affected — strict eval declarations get their own environment.)
+
+   The decisive probe: wrap `globalThis.__srk_vm_hoist` from guest code (it
+   is called inside eval_in_realm right before the eval) and log host-global
+   state there — the host was already poisoned at that point, proving the
+   write predated the sandboxed eval and pointing at the compile path.
+
+   Debugging notes for whoever ends up here again: the "ext:...:LINE"
+   numbers in guest stacks do NOT map 1:1 to polyfill sources (runtime
+   lowering shifts them); an `eval at <anonymous>` frame may be any
+   runtime-eval'd script whose name mapping was lost; and jest's console
+   capture swallows console.error inside a failing suite — use
+   `process._rawDebug`.
 
 ## Smaller known items
 
