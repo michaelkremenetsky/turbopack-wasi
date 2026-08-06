@@ -141,6 +141,70 @@ SANDBOX_GLOBAL):
    capture swallows console.error inside a failing suite — use
    `process._rawDebug`.
 
+## test/production tier (in progress)
+
+With test/unit fully green, the campaign moved to test/production — real
+createNext tests: each provisions a standalone app, runs `next build` /
+`next start` in it, and asserts over HTTP. Status: config-validation went
+4/4 green with a real in-guest build; the full first slice (config-validation,
+app-document-style-fragment, dedupes-scripts) has every TEST passing, with
+teardown fixed by the kernel `ps` applet below.
+
+How it runs (all strapkit-side; `build-nextprod-seed.mjs` + the same
+next-jest-harness page with `?seed=nextprod`):
+
+- The seed packs test/lib + jest-setup-after-env + selected production suites,
+  a synthesized package.json/jest.config.js (rootDir test, modulePaths
+  <rootDir>/lib), the repo's pnpm-workspace.yaml security block
+  (pnpm-security-settings.js throws without it; next-swc-wasi added to
+  minimumReleaseAgeExclude since it's republished per next release), and a
+  stub for the .github repo-setup module the vendored tree strips.
+- Per-test installs use the test lib's own CI mechanism:
+  `NEXT_TEST_PKG_PATHS='[["next","16.3.0"]]'` makes createNextInstall skip
+  the monorepo turbo/pack step and write `next: 16.3.0` into the app's
+  dependencies — pnpm then resolves next from the guest registry, where the
+  packument mutation injects next-swc-wasi. Zero require-hook tricks.
+- The NEXT_TEST_STARTER fs.cp fast path turned out to be dead code upstream:
+  NextInstance defaults `dependencies`/`packageJson` to `{}`, so its
+  `!this.dependencies` guard can never pass. CI evidently relies on
+  NEXT_TEST_PKG_PATHS + a warm pnpm store, and so do we.
+
+Fixed along the way:
+
+1. deno node:vm exposed `SyntheticModule`/`SourceTextModule`/`Module`
+   unconditionally; node gates them behind --experimental-vm-modules, and
+   jest probes `typeof vm.SyntheticModule` to decide whether requiring .mjs
+   is forbidden — so e2e-utils' `import '.../reset-project.mjs'` chain died
+   with ERR_REQUIRE_ESM in the guest while passing on stock node. Fixed
+   upstream-style: node_options.ts learned the flag, vm.js only attaches the
+   classes when it's set, the node-compat bundle's Flags whitelist passes it
+   through (test-vm-module-* get it via manifest NODE_OPTIONS now, like
+   node's own runner), and the strapkit vm spec tests declare it in envs.
+   Regression gate: 98 vm node-compat tests, zero regressions vs the real
+   deno 2.9 linux baseline.
+2. Guest exit statuses now keep only the low 8 bits (POSIX WEXITSTATUS): a
+   guest calling process.exit(-44) was observed as -44, which execa reads as
+   a -errno and feeds getSystemErrorName a positive number (throws
+   ERR_OUT_OF_RANGE, masking the real failure). Linux reports 212; now so do
+   we (kernel.js 'exit').
+3. Kernel `/bin/ps` applet: teardown in the test lib (and anything else using
+   npm's tree-kill) walks `ps -o pid --no-headers --ppid <pid>`; the guest
+   had no ps, so every next.destroy() threw ENOENT and the following suite
+   burned its hook timeout on the still-running server. The kernel now
+   answers ps itself from its process table (spawn() intercepts the seeded
+   /bin/ps marker; procps-compatible flags/exit status, tree-kill verified
+   in-guest end to end). Also fixed: a reaped workerless applet pushed an
+   undefined channel slot back to the pool, poisoning the next spawn.
+4. create-next-install.js (vendored): the post-install "@next/env resolved
+   from the npm registry" sanity check now only applies when NEXT_TEST_PKG_PATHS
+   entries are tarball paths — a plain version/range means registry
+   resolution is the expected outcome. (Upstreamable.)
+
+Known cosmetic leftovers: killed coreutils `sleep` children die with a wasm
+panic + exit 127 instead of 143, and spawn-failure error objects carry wasi
+errno numbers (-44) where node uses uv/linux ones (-2) — error.code is right,
+so nothing string-matching breaks; both noted, neither load-bearing.
+
 ## Smaller known items
 
 - Unit tests that import monorepo sources or the e2e lib are excluded in the
