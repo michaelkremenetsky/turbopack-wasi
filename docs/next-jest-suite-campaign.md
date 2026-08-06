@@ -272,6 +272,63 @@ panic + exit 127 instead of 143, and spawn-failure error objects carry wasi
 errno numbers (-44) where node uses uv/linux ones (-2) — error.code is right,
 so nothing string-matching breaks; both noted, neither load-bearing.
 
+### Third wave (2026-08-06): the server-start tier
+
+The first two waves were build-then-assert; this one is the suites that
+`next start` a real server and assert over HTTP (fetch/cheerio, ISR
+revalidation, middleware, adapters). 41 new suites seeded (106 total in the
+nextprod seed now), run in 8 chunks + a salvage pass. Result: **37 new green
+suite files**, 6 legitimate self-skips (webpack-only or cache-components
+`describe.skip`, same set CI skips under `IS_TURBOPACK_TEST`), and no
+unexplained failures. Highlights: the whole ISR family (prerender-revalidate,
+revalidate-as-path, root-catchall-cache), the adapter-config family,
+app-dir-edge-runtime-with-wasm (an edge route loading a wasm module inside
+the wasm guest), required-server-files, and the pure-next half of
+deterministic-build — two builds with different deployment ids produce
+byte-identical `.next` output in the sandbox.
+
+Two real bugs surfaced and got fixed at the right layers:
+
+1. **Binding the guest's own address failed.** `Deno.networkInterfaces()`
+   deliberately reports a QEMU-style eth0 at 10.0.2.15 (so yarn's offline
+   probe works), but the socket2 wasip1 backend rejected binds to anything
+   but wildcard/127.0.0.1 with EADDRNOTAVAIL — correct for 127.0.0.2-style
+   probes, wrong for the guest's own interface address, which every real
+   host accepts. `get-port-please` walks networkInterfaces() and binds each
+   address, so rewrite-request-smuggling's backend died in beforeAll. Fixed
+   in the vendored socket2 (accept 10.0.2.15, alias onto the loopback
+   fabric) and in kernel.js `_isLoopbackIp` (connects to 10.0.2.15 route to
+   local listeners). Verified: rewrite-request-smuggling 6/6 on the rebuilt
+   runtime.
+2. **The registry's dist-tags endpoint is CORS-dark.**
+   `/-/package/<name>/dist-tags` sends no `access-control-allow-origin`
+   (packuments and tarballs send `*`), so the browser-native fetch inside
+   strapkit's fetch-proxy can never serve it — and `pnpm dlx vercel@latest`
+   resolves the tag through exactly that endpoint. The proxy now intercepts
+   the path and answers from the abbreviated packument (same data, CORS-ok),
+   run through the usual packument-mutation pipeline so synthesized
+   next-swc-wasi tags stay consistent.
+
+Documented limitations (not bugs), so nobody re-litigates them:
+
+- turbopack-node-backend's childProcesses variant asserts loaderPid !=
+  buildPid. The wasi build compiles without the process pool and normalizes
+  `childProcesses` to the worker pool (`ChildProcessesUnsupported` in
+  next-core), so the pids are equal by design. The workerThreads variant
+  passes.
+- deployment-id's "build output API" variants run `pnpm dlx vercel@latest
+  build` — 2+ full builds per test — which cannot fit jest's 60s per-test
+  cap at guest build speed. Structural, not flaky; retries don't apply.
+
+Open runtime bug for a dedicated session: under cacheComponents,
+static-prerender workers stall past next's own 60s-per-page limit (3
+attempts, then the build fails) — adapter-content-hashes' cacheComponents
+variant reproduces it every time while its standard variant passes.
+
+Not yet run from the vetting sweep: suites with custom `dependencies:`
+(they bypass the starter install path), css-features file-level selection,
+and the app-dir/* eligibles.
+
 ## Smaller known items
 
 - Unit tests that import monorepo sources or the e2e lib are excluded in the
