@@ -217,13 +217,18 @@ Fixed along the way:
    from the npm registry" sanity check now only applies when NEXT_TEST_PKG_PATHS
    entries are tarball paths — a plain version/range means registry
    resolution is the expected outcome. (Upstreamable.)
-5. strapkit's pnpm-workspace.yaml wasm-alias writer refused ALL flow-style
-   YAML and printed a two-line warning into every build's output —
-   createNextInstall emits `overrides: {}` (js-yaml flow form for an empty
-   map), so the warning polluted cliOutput and broke every output-matching
-   assertion. The writer now deflows simple/empty single-line maps and lists
-   into block style and edits them normally; only genuinely complex flow
-   content still warns.
+5. strapkit's pnpm-workspace.yaml wasm-alias writer was a hand-rolled line
+   editor that refused flow-style YAML and printed a two-line warning into
+   every build's output — createNextInstall emits `overrides: {}` (js-yaml
+   flow form for an empty map), so the warning polluted cliOutput and broke
+   every output-matching assertion, and other YAML shapes kept biting the
+   same way. Replaced wholesale: strapkit now vendors the `yaml` npm package
+   (v2.8.1, bundled verbatim, provenance in the file header) and edits the
+   file through its comment-preserving Document API, so anything pnpm parses
+   is editable — flow or block, any indent — with the project's comments
+   kept. The only remaining warn path is a file that doesn't parse at all
+   (which pnpm would reject too). Verified by rerunning the config/dedupes
+   chunk green on the rebuilt runtime.
 
 Known cosmetic leftovers: killed coreutils `sleep` children die with a wasm
 panic + exit 127 instead of 143, and spawn-failure error objects carry wasi
