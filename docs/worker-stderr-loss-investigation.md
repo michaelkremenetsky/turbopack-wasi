@@ -143,3 +143,32 @@ patch processChild.js, then a direct `next build`.
   deno.js URL, `path.isAbsolute` misses it, upstream pathToFileURL prepends
   file://. Harmless; could be silenced by giving eval'd frames a
   file://-shaped sourceURL.
+
+## Third session (2026-08-06, cont.): the eater is stray-stash starvation — two fixes landed, one gap left
+
+- Confirmed with SRK_PIPE_DEBUG (new env flag, wasi.js/process.js/thread.js in
+  strapkit-rust): the fatal poll completion surfaces as `stray-noinfo` only at
+  child-EOF time — it sat undelivered for the whole failure window. No
+  subpolls-clear, no strayops-overflow: the stash simply is not consumed while
+  the parent realm idles.
+- With SRK_POLL_DEBUG on, the parent's io driver runs ~100 EMPTY polls/s
+  (nsubs=0, `empty0` counter) during the export phase — its child-pipe reads do
+  NOT ride poll_oneoff subscriptions there, and neither the empty branch nor
+  the first ready-now fast path consumed the stray stash.
+- Fixes landed in strapkit-rust wasi.js (uncommitted, for review): stray-stash
+  + CQ consumption added to (1) the first ready-now fast path and (2) the
+  empty-poll branch, mirroring the timer-only branch. Both are correct and
+  stay; with full debug env the suite went GREEN once.
+- BUT the plain (no-debug) run still fails: capturing the edge into
+  pendingReadablePipes only helps if something later re-subscribes the pipe,
+  and in the quiet config the reader apparently never re-polls. Next probe:
+  rerun with SRK_PIPE_DEBUG only (no POLL_DEBUG) and check whether `stray p50`
+  now logs promptly (empty-branch drain working) and whether a
+  `deliver-pending p50` ever follows. If prompt capture + no delivery: the
+  reader's re-poll is the missing leg — look at how the parent reads child
+  stdio pipes when the io driver has zero subs (uv_compat pipe read path /
+  deno resource reads; libs/core/uv_compat/pipe.rs, ext/io read wiring), and
+  consider a kernel-side re-kick: on _pipeWrite with buffered data and no
+  pollers/pending, re-complete a captured-edge notification or wake the
+  proc's park word so the reader re-polls.
+- Repro assets unchanged (werr11url/werr12url in session scratchpad; ~7min/run).
