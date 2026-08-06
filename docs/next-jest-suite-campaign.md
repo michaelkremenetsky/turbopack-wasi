@@ -154,6 +154,43 @@ fresh guest, both jest exit 0. IS_TURBOPACK_TEST=1 must be in the env or the
 webpack-config-only tests run (and hard-fail against Turbopack's
 webpack-config error) instead of self-skipping like on CI.
 
+Second wave (2026-08-05): the slice grew from 10 to 59 suites — everything
+in test/production that an Explore sweep vetted as browser-free, native-dep
+free, and not turbopack-self-skipping, run in chunks of 4-7 with a fresh
+guest per chunk. Result: 47 new suites GREEN, 3 legitimately skipped
+(scss-invalid-module is describe.skip'd upstream, typescript-custom-tsconfig
+and error-plugin-stack-overflow self-skip under IS_TURBOPACK_TEST), zero
+unexplained failures. debug-build-path needs a solo run (16 sequential
+`pnpm next build`s, 596s green). Three real bugs found and fixed on the way:
+
+1. The PUBLISHED next-swc-wasi@16.3.0-build.1 npm artifact is missing
+   wasm-link-sections.cjs — publish.sh's fail-loud guard for exactly this
+   was added after that publish went out. Every build whose static
+   generation spawns the turbo-tasks worker pool dies with "Cannot find
+   module './wasm-link-sections.cjs'" in the wasi worker bootstrap. Runs now
+   use ?swclocal=1 (the staged local pack has the file); the durable fix is
+   republishing (`publish.sh v16.3.0` -> build.2), which is pending with the
+   repo owner.
+2. Upstream's buildTS helper spawns `node --no-deprecation tsc`; the
+   strapkit /bin/node shim forwarded the flag to deno's CLI parser, which
+   rejects it and killed the spawn (custom-server-types). Fixed in the
+   kernel's arg translation (exec.js nodeTranslateRequire): the
+   warning/deprecation-channel flag family is swallowed the same way
+   --enable-source-maps already was.
+3. build-nextprod-seed.mjs skipped node_modules everywhere while packing
+   suites; typeof-window-replace ships a checked-in fixture package at
+   app/node_modules/comps that the app imports. The seed now packs
+   node_modules (the vendor checkout is pristine, so any node_modules in a
+   suite dir is intentional fixture content) and only skips .next.
+
+Memory: guest tabs were spiking 25GB+ and hammering memory pressure. Fixed
+with the two knobs the runtime already had: DENO_WASM_NUM_CPUS=4 (shrinks
+next's static-export worker-process pool — the actual multiplier — via
+__SRK_NCPUS -> navigator.hardwareConcurrency) and SRK_MEM_MAX_PAGES=49152
+(3GB per-process cap vs the 4GB wasm32 default). Measured across chunks:
+the tab now adds ~2-3GB over the system baseline at peak, with no visible
+build-time regression (suite times matched the uncapped runs).
+
 Two findings from the long single-run attempts, both reported upstream to
 the runtime owner rather than papered over:
 
