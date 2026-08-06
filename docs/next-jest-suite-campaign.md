@@ -329,6 +329,71 @@ Not yet run from the vetting sweep: suites with custom `dependencies:`
 (they bypass the starter install path), css-features file-level selection,
 and the app-dir/* eligibles.
 
+### Fourth wave (2026-08-06): custom-dependencies suites + the webpack pivot
+
+The hypothesis from the vetting sweep held: suites that declare their own
+`dependencies:` work fine under NEXT_TEST_PKG_PATHS — the deps merge into
+the per-test package.json and pnpm resolves them through the guest
+registry; the stubbed linkPackages path is never reached. 17 suites ran in
+three chunks, 15 green files:
+
+- Chunk d1: tsconfig-verifier (380s — the slow one), edge-dynamic-code-eval,
+  re-export-all-exports-from-page-disallowed, fallback-modules.
+- Chunk d2: css-url-deployment-id, custom-error-500, critical-css,
+  enoent-during-require, typescript-checked-side-effect-imports,
+  supports-module-resolution-nodenext.
+- Chunk d3: reading-request-body-in-middleware, edge-runtime-is-addressable,
+  dependencies-can-use-env-vars-in-middlewares,
+  typescript-paths-baseUrl-inherited, transpile-packages.
+
+The two non-green:
+
+- build-spinners needs node-pty (`build/Release/pty.node`), a native C
+  addon with no wasm build. Documented limitation, same class as native
+  sharp.
+- graceful-shutdown fails exactly one test, deterministically ("development
+  (next dev) › should shut down child immediately"): after SIGTERM to
+  `next dev`, the in-flight 400ms request completes with a 200 instead of
+  the connection being severed. Kill propagation isn't tearing down the
+  child's open sockets promptly. Open kernel bug for a dedicated session.
+
+Then the webpack pass started (user-directed). The switch that matters:
+dropping IS_TURBOPACK_TEST is NOT enough — next 16 defaults to turbopack;
+`IS_WEBPACK_TEST=1` (read in packages/next/src/lib/bundler.ts) is what
+selects webpack. First results, all with full webpack production builds
+in-guest through next-swc-wasi:
+
+- webpack-config-mainjs, webpack-bun-externals, externals-esm-loose: PASS.
+- turbotrace-with-webpack-worker: fails only because its image-import page
+  makes the build load sharp (see below).
+- css-customization: too big for one 540s window (~15 webpack builds), so
+  it ran as -t halves. "Basic CSS|Correct CSS": 6 passed, 2 failed — both
+  in the legacy "custom loader" block whose fixture next.config.js does
+  `require('styled-jsx/webpack')`, a transitive-dep require that standard
+  pnpm isolation shouldn't resolve anywhere; flagged for upstream-CI
+  comparison rather than as a runtime bug.
+
+The sharp probe (also user-requested) has a crisp verdict now:
+
+- `process.platform/arch` in-guest is `linux/wasm32`; npm installs sharp's
+  optional `@img/sharp-wasm32` + `@img/sharp-webcontainers-wasm32` (the
+  latter is just an alias for the former) without any flags beyond
+  `--include=optional`.
+- `require('sharp')` works, instance creation works. Every actual pixel
+  operation (`.png().toBuffer()`) hangs forever — the emscripten/emnapi
+  pthread pool never runs the job. vips concurrency is already 1 in the
+  wasm build and forcing it changes nothing.
+- So: sharp-wasm32 is one runtime fix away (emscripten pthread dispatch
+  inside proc workers), and it unlocks turbotrace-with-webpack-worker plus
+  the image suites. Dedicated-session bug, same tier as the cacheComponents
+  stall.
+
+One more loose thread from the misconfigured first webpack attempt (builds
+still ran turbopack): turbopack's node-code evaluation reported
+`Invalid source map ... 'file://http://localhost:8755/...deno.js'` — we
+prefix an http URL with file:// somewhere in the sourcemap plumbing.
+Cosmetic in that run, but worth a look.
+
 ## Smaller known items
 
 - Unit tests that import monorepo sources or the e2e lib are excluded in the
