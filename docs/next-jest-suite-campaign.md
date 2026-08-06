@@ -394,6 +394,52 @@ still ran turbopack): turbopack's node-code evaluation reported
 prefix an http URL with file:// somewhere in the sourcemap plumbing.
 Cosmetic in that run, but worth a look.
 
+### Fifth wave (2026-08-06): the full webpack sweep
+
+The whole 123-suite production seed re-ran under IS_WEBPACK_TEST=1 in ~20
+chunks. Headline: the webpack pipeline in-guest is as healthy as turbopack's
+— full builds, CSS (incl. minify/critical/deployment-id URLs), babel-custom,
+prerender/ISR, adapters, middleware, edge runtime, export, typescript paths
+all green. Roughly 95 suite-files passed; every failure fell into one of
+four already-known buckets, no new bug classes:
+
+1. **sharp (emnapi pthread hang)** — turbotrace-with-webpack-worker,
+   build-trace-extra-entries, build-trace-extra-entries-turbo,
+   turborepo-access-trace. All four have an image-import page; webpack
+   loads sharp at build time where turbopack doesn't, so the sweep
+   surfaced them. One runtime fix unlocks all four plus the image suites.
+2. **Prerender/build-worker error propagation** — errors thrown inside
+   static-generation workers are lost: the build exits 1 but the message
+   ("Error occurred prerendering page …", getStaticProps errors, BigInt
+   serialize, missing image `loader` prop, getStaticPaths-on-non-dynamic)
+   never reaches cliOutput, usually alongside "Next.js build worker exited
+   with code: 1". Repros: app-dynamic-error, gsp-build-errors,
+   json-serialize-original-error, mixed-ssg-serverprops-error,
+   export-image-loader(+legacy). One kernel-worthy bug, five repros.
+3. **Structural jest caps at guest webpack speed** (60s per test / 300s
+   per hook, builds inside the test body): adapter-config-export,
+   build-warnings ("missing cache in CI" only), static-404,
+   production-build-dir, app-type hybrid, tsconfig-verifier "target mode"
+   (+ its collateral node16 snapshot), and the multi-build monsters
+   debug-build-path (thirds: explicit-paths green, glob/negation don't
+   fit a window) and export-intent (fit, barely, at 369s). Not bugs.
+4. **CI-parity skips** — adapter-config-cache-components,
+   export-immutable-assets, route-bundle-stats, scss-invalid-module,
+   turbopack-node-backend (turbopack-only under this env).
+
+Two one-off notes: ipc-forbidden-headers timed out inside a loaded chunk
+but passes clean solo (78s) — chunk-load, not a bug; graceful-shutdown
+under webpack runs all three modes and adds "finish pending requests but
+refuse new ones" failures in next start AND standalone to the dev
+kill-immediately failure — the shutdown-semantics bug is broken in both
+directions and now has a rich repro set.
+
+Ops note for future overnight sweeps: the stalls that plagued the early
+webpack chunks were the MACHINE idle-sleeping (Chrome froze, watchers
+froze, everything resumed on wake). Fixed with a caffeinate held for the
+sweep plus a Web Lock in the harness page so Chrome won't freeze the tab
+independently.
+
 ## Smaller known items
 
 - Unit tests that import monorepo sources or the e2e lib are excluded in the
