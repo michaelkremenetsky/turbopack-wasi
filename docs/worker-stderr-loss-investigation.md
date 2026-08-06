@@ -49,7 +49,55 @@ piped-stderr delivery loss specific to the real static worker.
   `exit` message code=1 (traps reap 127 with a diag line; kills reap 128+sig
   with err="killed" — neither seen).
 
-## Remaining suspects (next session starts here)
+## RESOLVED DOWN TO THE EXACT EDGE (2026-08-06, second session)
+
+The two "suspects" below are both dead — this section supersedes them.
+Established live with kernel-side probes (gated behind __SRK_SPAWN_DEBUG=1,
+left in strapkit-rust os/web/runtime/kernel/kernel.js: `[stdw]` in _routeStd,
+`[piperd]`/`[pipoll]`/`[pidrn]` in the pipe read/poll/drain paths):
+
+- next's export worker does NOT patch console (plain console.error in
+  export/worker.ts; `{type:'activity'}` is only sent on successful exports).
+- In the failing worker, console.error IS called with the full expected text
+  (processChild.js shim, /tmp/werr8.log) but process.stderr.write is NOT what
+  it uses — deno's console is op_print, which writes fd2 directly. All three
+  write paths (fs.writeSync(2), the node stream, op_print) deliver EARLY in
+  the worker's life and are ALL lost LATE, each claiming success (writeStd is
+  fire-and-forget; op_print additionally swallows BrokenPipe).
+- Kernel truth: every "lost" write REACHES the kernel and IS appended to the
+  child's stderr sink pipe (readOpen=1, no EPIPE, nothing dropped). The bytes
+  sit in the pipe buffer forever (e.g. pipe 50: buf grows 0->514 across the
+  error prints, never consumed).
+- Read side: the PARENT (next build main, MAIN reactor — tgt=main on every
+  poll/read) reads the pipe fine through the collect-page-data phase. At the
+  export-phase transition the parked pipe poller is woken once more by the
+  first error write (`[pidrn] pollers=1 r=1 tgts=main` — completion written
+  to main's CQ + wake) and after that the parent NEVER issues another
+  pipe-poll or pipe-read for that pipe, ever — while the same realm's
+  spinner/IPC/exit handling all keep running. Even the EOF-time poll answer
+  (`buf=514 wo=0 -> ready`) is never followed by a read. The export pool's
+  OTHER workers' stderr pipes show the same neglect (their EARLY markers sat
+  unconsumed too).
+
+So: the readiness edge dies inside the parent guest between the CQ completion
+and tokio's read task — the mio interest/waker for the pipe effectively
+vanishes at the export-phase transition (new worker pool + heavy reactor
+churn). Same family as the dropped cross-thread waitAsync wakeups fixed in
+strapkit-rust de8af562e, and plausibly the cacheComponents stall's root.
+
+Next step (all live-served, no rebuild): add __srkPollDbg-gated logs in
+os/web/runtime/proc/wasi.js poll_oneoff — when a pipe read sub is collected
+(fd, pipeId, delivered-locally vs waitSub), in handleEv for `p*` keys, and in
+_consumeStrayEv — to see whether the CE1 completion was (a) matched in byOp
+and returned as readiness that tokio then ignored (waker mapping/task gone),
+or (b) consumed as a stray with no later pipe sub to deliver it to (interest
+dropped). Case (a) points at uv_compat/node-stream backpressure or a dropped
+read future; case (b) points at tokio io-driver interest loss. The repro is
+one harness run (~7 min): the werr8 URL in the session scratchpad
+(werr8url.txt) — jest app-dynamic-error with NEXT_TEST_SKIP_CLEANUP=1, then
+patch processChild.js, then a direct `next build`.
+
+## Remaining suspects (superseded — kept for history)
 
 1. next's static worker bootstrap patches console/stdio. Suggestive detail:
    lib/worker.ts expects workers to emit `{type:'activity'}` IPC messages on
