@@ -172,3 +172,46 @@ patch processChild.js, then a direct `next build`.
   pollers/pending, re-complete a captured-edge notification or wake the
   proc's park word so the reader re-polls.
 - Repro assets unchanged (werr11url/werr12url in session scratchpad; ~7min/run).
+
+## RESOLVED (2026-08-06, fourth session) — two fixes, suite green
+
+Final root cause, established with per-poll instrumentation (sub/adopt/submit/
+expire/stray/deliver-pending traces plus a pend-wait probe):
+
+1. **Stash consulted too late in poll_oneoff.** The readiness completion the
+   kernel emits at write time gets swallowed by whatever blocking awaitOp the
+   parent happens to be in, and lands in the per-realm stray stash. poll_oneoff
+   only drained that stash AFTER collecting subscriptions — so the captured
+   edge could never deliver in the same cycle, and worse, the 2s
+   adoption-expiry sweep deleted the submittedPolls entry microseconds before
+   the drain saw the completion (observed as `stray-noinfo`), destroying the
+   edge entirely. Fix: wasi.js now consumes the stash + reactor CQ at the TOP
+   of poll_oneoff, before sub collection; a captured edge is delivered
+   ready-now by the same call (`stray pN` immediately followed by
+   `deliver-pending pN` in the traces). The per-branch drains this replaces
+   are gone.
+
+2. **Child exit systematically outruns child stderr.** The exit watch rides a
+   ring socket whose readiness is visible guest-side at every poll; pipe
+   readiness rides a completion record that can be swallowed (see 1). next's
+   build parent also grinds synchronously for many SECONDS during the export
+   phase (srk-pc showed `calls+0` windows with ~3s of yields) — so worker
+   death and worker stderr both queue up, and at grind-end whichever the JS
+   layer processes first wins. When exit won, next's parent process.exit(1)'d
+   from its exit handler with the error text still unread in the sink pipe.
+   Fix: kernel.js `_reap` now defers exit-watch delivery (`_exitGateArm`)
+   until every stdio sink pipe that still buffers bytes, still has an open
+   read end, AND has demonstrably been read/polled before (`_readerSeen`) is
+   drained or loses its reader. The `_readerSeen` condition keeps plain
+   "await status without reading stdout" reaping instantly; a 30s cap (far
+   above any realistic parent grind — an early 3s cap expired mid-grind and
+   re-created the race) covers a reader that stops reading forever. Only the
+   watch path is gated; the sys_wait syscall path (shells) is untouched.
+
+Verification: `app-dynamic-error` + `gsp-build-errors` — Test Suites: 2
+passed, Tests: 8 passed, exit 0 — in the plain (no debug env) configuration
+that failed on every previous attempt, after all investigation probes were
+stripped. All strapkit-rust changes live in os/web/runtime (wasi.js,
+kernel.js), uncommitted for review. The SRK_PIPE_DEBUG flag and every
+[pipedbg]/[stdw]/[piperd]/[pipoll]/[pidrn] probe were removed; the exit gate
+keeps two lines gated behind __SRK_SPAWN_DEBUG ([exitgate] hold / timeout).
