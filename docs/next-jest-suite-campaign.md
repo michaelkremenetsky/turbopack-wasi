@@ -145,10 +145,28 @@ SANDBOX_GLOBAL):
 
 With test/unit fully green, the campaign moved to test/production — real
 createNext tests: each provisions a standalone app, runs `next build` /
-`next start` in it, and asserts over HTTP. Status: config-validation went
-4/4 green with a real in-guest build; the full first slice (config-validation,
-app-document-style-fragment, dedupes-scripts) has every TEST passing, with
-teardown fixed by the kernel `ps` applet below.
+`next start` in it, and asserts over HTTP. Status: the first ten suites are
+GREEN (app-document-style-fragment, app-dynamic-error, auto-export-error-bail,
+auto-export-query-error, build-warnings, config-evaluation-error,
+config-promise-error [self-skips under IS_TURBOPACK_TEST], config-syntax-error,
+config-validation, dedupes-scripts) — run in two chunks of ~5 suites, each a
+fresh guest, both jest exit 0. IS_TURBOPACK_TEST=1 must be in the env or the
+webpack-config-only tests run (and hard-fail against Turbopack's
+webpack-config error) instead of self-skipping like on CI.
+
+Two findings from the long single-run attempts, both reported upstream to
+the runtime owner rather than papered over:
+
+- The guest slows roughly 2x over a ~10-suite sequential run:
+  auto-export-query-error's build-in-test takes ~34s in a fresh guest but
+  breaches e2e-utils' hard-coded 60s per-test cap when it runs sixth. That
+  cap is not configurable (NEXT_E2E_TEST_TIMEOUT only raises setup hooks),
+  so chunked runs are the honest gate shape until the degradation itself is
+  fixed.
+- clean-distdir is excluded: it asserts `.next/cache` survives a rebuild,
+  and the current next-swc-wasi pack still forces the in-memory turbo-tasks
+  store, so nothing lands on disk. Re-add once the binding is repacked with
+  the on-disk store (vendor commits c54615da/16500b0a).
 
 How it runs (all strapkit-side; `build-nextprod-seed.mjs` + the same
 next-jest-harness page with `?seed=nextprod`):
@@ -199,6 +217,13 @@ Fixed along the way:
    from the npm registry" sanity check now only applies when NEXT_TEST_PKG_PATHS
    entries are tarball paths — a plain version/range means registry
    resolution is the expected outcome. (Upstreamable.)
+5. strapkit's pnpm-workspace.yaml wasm-alias writer refused ALL flow-style
+   YAML and printed a two-line warning into every build's output —
+   createNextInstall emits `overrides: {}` (js-yaml flow form for an empty
+   map), so the warning polluted cliOutput and broke every output-matching
+   assertion. The writer now deflows simple/empty single-line maps and lists
+   into block style and edits them normally; only genuinely complex flow
+   content still warns.
 
 Known cosmetic leftovers: killed coreutils `sleep` children die with a wasm
 panic + exit 127 instead of 143, and spawn-failure error objects carry wasi
