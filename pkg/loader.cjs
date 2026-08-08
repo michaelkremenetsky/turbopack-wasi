@@ -215,6 +215,15 @@ if (IN_POOL_WORKER) {
           dbg('wasi worker spawn');
           const w = new Worker(path.join(__dirname, 'wasi-worker.mjs'), { env: process.env });
           w.on('error', (e) => console.error('[next-swc-wasi] wasi worker error:', e && e.message || e));
+          // Don't let idle async-work-pool threads pin the process open. On a
+          // native binding these are OS threads that never touch Node's event
+          // loop; here they're worker_threads, so an idle one keeps `next build`
+          // alive forever after the build has printed its summary — the child
+          // never exits and the e2e harness (which awaits process exit) times
+          // out. An in-flight napi call still holds its own ref while pending,
+          // so unref only frees the loop once all work is genuinely done. Same
+          // treatment the SWC-plugin bridge worker already gets below.
+          w.unref();
           return w;
         },
         overwriteImports(importObject) {
