@@ -184,7 +184,13 @@ if (IN_POOL_WORKER) {
       const limits = memoryLimits(bytes) ?? { min: 8192, max: 65536, shared: true };
       dbg('module memory limits', JSON.stringify(limits));
 
-      const threads = Math.max(2, parseInt(process.env.SRK_TURBOPACK_THREADS || '', 10) || 4);
+      // Floor of 1 (not 2): SRK_TURBOPACK_THREADS=1 must mean a genuinely
+      // single-threaded pool. The worker threads share one growable linear
+      // memory, and a cross-thread grow that a sibling doesn't observe faults
+      // as "memory access out of bounds"; running the pool at 1 sidesteps that
+      // race entirely (the sole thread always observes its own grows) and is a
+      // valid escape hatch until the shared-memory grow propagation is fixed.
+      const threads = Math.max(1, parseInt(process.env.SRK_TURBOPACK_THREADS || '', 10) || 4);
       // std::thread::available_parallelism() returns Err on wasi (no CPU probe),
       // which collapses turbopack's JS evaluate pool (postcss / tailwind /
       // webpack-loaders / next-font) to a concurrency of 1 for the WHOLE
@@ -199,6 +205,16 @@ if (IN_POOL_WORKER) {
       }
       if (!process.env.TURBOPACK_PARALLELISM) {
         process.env.TURBOPACK_PARALLELISM = String(threads);
+      }
+      // Stack headroom for the one thread class the build flags don't reach:
+      // std::thread::spawn with default attrs reads RUST_MIN_STACK at runtime.
+      // The tokio pool is built with 16MB stacks (patch 0011) and the emnapi
+      // async workers mirror the -zstack-size'd main stack, but a bare
+      // std::thread in some dep would otherwise get the 2MB default — and on
+      // wasm a stack overflow faults as "memory access out of bounds" with no
+      // useful identity. Same override-respecting pattern as above.
+      if (!process.env.RUST_MIN_STACK) {
+        process.env.RUST_MIN_STACK = String(64 * 1024 * 1024);
       }
       const wasi = new WASI({ version: 'preview1', env: process.env, preopens: { '/': '/' } });
 
@@ -227,9 +243,20 @@ if (IN_POOL_WORKER) {
           return w;
         },
         overwriteImports(importObject) {
+          // Diagnostic knob (default off): SRK_TP_INITIAL_PAGES forces the
+          // shared memory's initial page count. Setting it to the declared
+          // maximum means the memory can never grow — used to isolate whether
+          // the multi-thread OOB is a grow-propagation race (should vanish when
+          // no grow is possible) or a turbopack-internal data race (persists).
+          // Unset/invalid → the module's declared minimum, i.e. normal behavior.
+          const maxPages = limits.max ?? 65536;
+          const initEnv = parseInt(process.env.SRK_TP_INITIAL_PAGES || '', 10);
+          const initialPages = Number.isFinite(initEnv) && initEnv > 0
+            ? Math.min(initEnv, maxPages)
+            : limits.min;
           pluginBridgeMemory = new WebAssembly.Memory({
-            initial: limits.min,
-            maximum: limits.max ?? 65536,
+            initial: initialPages,
+            maximum: maxPages,
             shared: limits.shared,
           });
           importObject.env = {

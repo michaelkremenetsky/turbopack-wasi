@@ -73,6 +73,14 @@ mkdir -p "$STAGE"
 cp "$DIST"/index.wasm32-wasi.wasm "$DIST"/index.wasi.cjs "$DIST"/index.wasi-browser.js \
    "$DIST"/wasi-worker.mjs "$DIST"/wasi-worker-browser.mjs "$DIST"/index.d.ts \
    "$DIST"/index.js "$DIST"/browser.js "$STAGE"/ 2>/dev/null || true
+# The napi-generated loaders create the shared memory with maximum: 10240
+# pages (640MB) — a napi-rs template default, way under the module's declared
+# 4GB max. Our pkg/loader.cjs path builds its own memory from the module's
+# limits so it never hits this, but anyone loading the package through the
+# stock index.wasi.cjs / index.wasi-browser.js entrypoints would OOM a real
+# `next build` at 640MB. Lift the generated cap to the module's 65536.
+sed -i.bak 's/maximum: 10240/maximum: 65536/' "$STAGE"/index.wasi.cjs "$STAGE"/index.wasi-browser.js \
+  && rm -f "$STAGE"/index.wasi.cjs.bak "$STAGE"/index.wasi-browser.js.bak
 # wasm-link-sections.cjs is REQUIRED by the wasi-worker loaders (inject-read-custom-section.mjs
 # rewrites them to `require('./wasm-link-sections.cjs')` for the env.read_custom_section host
 # import). Without it every worker-thread spawn throws "Cannot find module

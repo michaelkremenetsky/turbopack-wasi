@@ -1,0 +1,9 @@
+:root {
+  --hello-accent: #0070f3;
+}
+
+body {
+  font-family: system-ui, sans-serif;
+  color: var(--hello-accent);
+  margin: 2rem;
+}

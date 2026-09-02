@@ -92,7 +92,12 @@ WASI_BLOCK = '''    if env::var("CARGO_CFG_TARGET_OS").is_ok_and(|value| value =
         println!("cargo:rustc-link-arg=--import-memory");
         println!("cargo:rustc-link-arg=--import-undefined");
         println!("cargo:rustc-link-arg=--max-memory=4294967296");
-        println!("cargo:rustc-link-arg=-zstack-size=6400000");
+        // 16MB, matching the tokio thread_stack_size choice: emnapi's async
+        // workers size their stacks to min(main stack, 8MB cap), and the old
+        // 6.1MB main stack still left room for deep swc/turbopack recursion to
+        // fault as "memory access out of bounds" (stacker is a no-op on wasm,
+        // so nothing grows a stack that's about to blow).
+        println!("cargo:rustc-link-arg=-zstack-size=16777216");
         println!("cargo:rustc-link-arg=--no-check-features");
         // The wasi reactor crt provides _initialize: main thread-pointer setup + C ctors.
         // rustc links no crt for cdylibs, and without TP setup napi registration spins

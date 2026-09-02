@@ -99,10 +99,18 @@ mkdir -p "$DIST"
 cp -Rv native/. "$DIST"/
 # Production pass: keep the full binary (with the ~26MB name section, useful for profiling)
 # as *.debug.wasm; ship a wasm-opt'd, name-stripped binary (100MB -> ~63MB).
+# The stripped binary is DERIVED from a names-kept optimized binary
+# (*.named.wasm) rather than optimized independently, so the two are the same
+# module byte-for-byte except the name section — a crash stack's
+# wasm-function[N] indices from the shipped binary symbolize directly against
+# the named one. (Before this, debug.wasm had pre-wasm-opt indices that don't
+# match the shipped module at all, which made OOB traps unattributable.)
 mv "$DIST/index.wasm32-wasi.wasm" "$DIST/index.wasm32-wasi.debug.wasm"
 if command -v wasm-opt >/dev/null 2>&1; then
-  wasm-opt -O2 -all --strip-debug --strip-producers \
-    "$DIST/index.wasm32-wasi.debug.wasm" -o "$DIST/index.wasm32-wasi.wasm"
+  wasm-opt -O2 -all -g \
+    "$DIST/index.wasm32-wasi.debug.wasm" -o "$DIST/index.wasm32-wasi.named.wasm"
+  wasm-opt -all --strip-debug --strip-producers \
+    "$DIST/index.wasm32-wasi.named.wasm" -o "$DIST/index.wasm32-wasi.wasm"
 else
   echo "WARNING: wasm-opt not found (brew/apt install binaryen); shipping stripped-only binary" >&2
   "$WASI_SDK_PATH/bin/llvm-strip" --strip-all \
